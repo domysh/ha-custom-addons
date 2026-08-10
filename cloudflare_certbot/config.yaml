@@ -1,0 +1,21 @@
+name: "Cloudflare Certbot"
+version: "1.1.0"
+slug: "cloudflare_certbot"
+description: "Issues and renews Let's Encrypt certificates for one or more domains via Cloudflare DNS-01. Certificates are written to /share/certs, readable by any add-on that maps the share folder."
+url: "https://github.com/certbot/certbot"
+arch:
+  - amd64
+  - aarch64
+startup: services
+boot: auto
+init: false
+map:
+  - share:rw
+options:
+  cf_api_token: ""
+  domains:
+    - "mail.domy.sh"
+schema:
+  cf_api_token: str
+  domains:
+    - str
