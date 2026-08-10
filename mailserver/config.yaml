@@ -1,5 +1,5 @@
 name: "Mail Server"
-version: "1.0.0"
+version: "1.1.0"
 slug: "mailserver"
 description: "docker-mailserver SMTP relay, TLS via shared Let's Encrypt certificate"
 url: "https://github.com/docker-mailserver/docker-mailserver"
