@@ -1,0 +1,65 @@
+name: bump-addon-images
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # ogni giorno alle 06:00 UTC
+  workflow_dispatch: {} # permette anche l'avvio manuale dalla tab Actions
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-bump:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - addon: mailserver
+            dockerfile_image: ghcr.io/docker-mailserver/docker-mailserver
+            registry_image: ghcr.io/docker-mailserver/docker-mailserver
+            tag_regex: '^[0-9]+\.[0-9]+\.[0-9]+$'
+          - addon: cloudflare_certbot
+            dockerfile_image: certbot/dns-cloudflare
+            registry_image: docker.io/certbot/dns-cloudflare
+            tag_regex: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install skopeo
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq skopeo jq
+
+      - name: Check for a newer upstream tag
+        id: check
+        run: |
+          set -euo pipefail
+          CURRENT=$(grep -oP "(?<=^FROM ${{ matrix.dockerfile_image }}:)\S+" "${{ matrix.addon }}/Dockerfile")
+          LATEST=$(skopeo list-tags "docker://${{ matrix.registry_image }}" \
+            | jq -r '.Tags[]' \
+            | grep -E '${{ matrix.tag_regex }}' \
+            | sort -V | tail -n1)
+          if [ -z "$LATEST" ]; then
+            echo "No tag on the registry matched the expected pattern, skipping." >&2
+            exit 1
+          fi
+          echo "Current: $CURRENT — Latest upstream: $LATEST"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Dockerfile and config.yaml, commit, push
+        if: steps.check.outputs.current != steps.check.outputs.latest
+        run: |
+          set -euo pipefail
+          CURRENT="${{ steps.check.outputs.current }}"
+          LATEST="${{ steps.check.outputs.latest }}"
+          CONFIG_VERSION="${LATEST#v}" # rimuove l'eventuale prefisso "v" per il campo version di config.yaml
+
+          sed -i "s#${{ matrix.dockerfile_image }}:${CURRENT}#${{ matrix.dockerfile_image }}:${LATEST}#" "${{ matrix.addon }}/Dockerfile"
+          sed -i "s#version: \".*\"#version: \"${CONFIG_VERSION}\"#" "${{ matrix.addon }}/config.yaml"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ matrix.addon }}/Dockerfile" "${{ matrix.addon }}/config.yaml"
+          git commit -m "chore(${{ matrix.addon }}): bump to ${LATEST}"
+          git pull --rebase origin main
+          git push origin HEAD:main
