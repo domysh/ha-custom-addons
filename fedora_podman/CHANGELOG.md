@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.1
+
+- Fix an empty `/etc/resolv.conf`, which left the shell with no name resolution
+  on every start. Docker provides `/etc/resolv.conf`, `/etc/hosts` and
+  `/etc/hostname` as individually bind-mounted files, and the persistent
+  system layer covers `/etc` with an overlay: overlayfs builds its view from
+  the lower filesystem's directory entries rather than from what is mounted on
+  top of them, so the base image's empty copy resurfaced. The three files are
+  now copied out before `/etc` is covered and bind-mounted back over the
+  overlay, from a tmpfs, so per-boot facts never end up in the persistent
+  layer.
+- Explain a storage directory that suddenly looks empty. An add-on's `/config`
+  is `app_configs/<slug>`, and the slug depends on the install source — a local
+  folder and a repository produce different ones — so reinstalling from the
+  other source yields an empty `/config` while the previous one sits intact
+  under its old name, with every image, container and installed package in it.
+  When the Podman storage is empty and a neighbouring directory holds what
+  looks like a previous installation, start-up now names it, with its size and
+  the commands to take it back.
+
 ## 1.0.0
 
 First public release.

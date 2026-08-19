@@ -19,6 +19,57 @@
 # track of everything installed the moment the container restarts.
 PERSIST_DIRS=(/usr /etc /opt /root /var)
 
+# Docker gives every container its /etc/resolv.conf, /etc/hosts and
+# /etc/hostname as individual bind-mounted files, and overlay-mounting /etc
+# hides them: overlayfs builds its view from the directory entries of the
+# lower filesystem, not from what is mounted on top of them, so what surfaces
+# is the base image's copy - and Fedora's image ships an empty resolv.conf.
+# The result is a container with no name resolution at all, on every start,
+# with nothing to explain it.
+#
+# So the three files are copied out before /etc is covered and bind-mounted
+# back on top of the overlay afterwards. Keeping the copies on a tmpfs rather
+# than letting them land in the persistent upper layer is deliberate: they are
+# per-boot facts, and a stale DNS server or a stale container IP persisted
+# across updates would be its own kind of confusing.
+DOCKER_MANAGED_ETC=(resolv.conf hosts hostname)
+RUNTIME_ETC_DIR=/run/addon-etc
+
+stash_docker_managed_etc() {
+    local name
+    mkdir -p "${RUNTIME_ETC_DIR}"
+    for name in "${DOCKER_MANAGED_ETC[@]}"; do
+        [ -f "/etc/${name}" ] || continue
+        cp -a "/etc/${name}" "${RUNTIME_ETC_DIR}/${name}" 2>/dev/null || true
+    done
+}
+
+rebind_docker_managed_etc() {
+    local base="$1" name restored=()
+
+    for name in "${DOCKER_MANAGED_ETC[@]}"; do
+        [ -f "${RUNTIME_ETC_DIR}/${name}" ] || continue
+
+        # A copy left in the upper layer by an older start would shadow the
+        # image's file even without the bind below; remove it so the only thing
+        # in play is the bind mount.
+        rm -f "${base}/upper_etc/${name}" 2>/dev/null || true
+        # The mount point has to exist inside the overlay.
+        [ -e "/etc/${name}" ] || : > "/etc/${name}" 2>/dev/null || true
+
+        if mount --bind "${RUNTIME_ETC_DIR}/${name}" "/etc/${name}" 2>/dev/null; then
+            restored+=("/etc/${name}")
+        else
+            warn "Could not restore /etc/${name} over the persistent /etc."
+            [ "${name}" = "resolv.conf" ] && warn "DNS resolution will not work until you write it by hand."
+        fi
+    done
+
+    if [ "${#restored[@]}" -gt 0 ]; then
+        log "Restored the container's own ${restored[*]} over the persistent /etc"
+    fi
+}
+
 # Guards against the one genuinely dangerous scenario: the add-on is rebuilt on
 # a newer base image, and a stale upper layer keeps shadowing files that the
 # new image updated - old libraries over a new glibc, for instance. Fedora's
@@ -92,6 +143,9 @@ setup_persistent_system() {
 
     prepare_layer_for_this_image "${base}" || return 0
 
+    # Before anything is covered: see DOCKER_MANAGED_ETC.
+    stash_docker_managed_etc
+
     local dir name upper work mounted=()
     for dir in "${PERSIST_DIRS[@]}"; do
         name="${dir//\//_}"
@@ -113,4 +167,6 @@ setup_persistent_system() {
         log "System persistence active on: ${mounted[*]} (upper layer in ${base})"
         log "Packages installed with dnf over SSH survive add-on updates."
     fi
+
+    rebind_docker_managed_etc "${base}"
 }

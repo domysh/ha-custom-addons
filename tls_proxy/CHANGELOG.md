@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.1
+
+- Report a clean shutdown as a clean shutdown. The entrypoint is PID 1, and its
+  final `wait -n` returns the exit status of whichever process ended — which
+  `set -e` then made the script's own status, so stopping the add-on was logged
+  as a failure. nginx is now asked to quit gracefully, finishing the requests
+  in flight, before anything is killed.
+- Stop one unreachable backend from taking down every other route. nginx's
+  default `proxy_connect_timeout` is 60 seconds and `worker_connections` was at
+  its default 1024, so requests queuing for a dead backend held worker slots
+  long enough to refuse connections on all domains — a single broken service
+  presenting as a total outage. Connections to a backend now fail after 5
+  seconds, on HTTP and TCP routes alike, and the worker limits are raised.
+  The long read and send timeouts are unchanged: they apply only after a
+  backend has accepted the connection, and are what keeps websockets and
+  long-poll requests alive.
+
 ## 1.0.0
 
 First public release.

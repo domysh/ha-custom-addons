@@ -109,6 +109,15 @@ http_location() {
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection $connection_upgrade;
       proxy_buffering off;
+      # Fail fast on a backend that is down. The default here is 60 seconds,
+      # and every request waiting on it holds a worker connection for that
+      # long - so one dead backend can exhaust the worker connections and take
+      # every *other* route down with it, which looks like the whole proxy
+      # having crashed rather than one service being unreachable.
+      proxy_connect_timeout 5s;
+      # Long, deliberately: these apply once the backend has accepted the
+      # connection, and they are what keeps websockets and long-poll requests
+      # from being cut every minute.
       proxy_read_timeout 3600s;
       proxy_send_timeout 3600s;
     }
@@ -127,7 +136,12 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
   echo "worker_processes auto;"
   echo "error_log /dev/stderr notice;"
   echo "pid /var/run/nginx.pid;"
-  echo "events { worker_connections 1024; }"
+  # 1024 is nginx's conservative default and is the ceiling that turns one
+  # misbehaving backend into an outage for everything: with long-lived
+  # connections held open per route, a few hundred stuck requests are enough to
+  # refuse new ones on every domain. The memory cost of raising it is a few MB.
+  echo "worker_rlimit_nofile 16384;"
+  echo "events { worker_connections 4096; }"
   echo ""
 
   if [ "$HAS_TCP_ROUTES" -gt 0 ]; then
@@ -155,6 +169,9 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
       [ "$ENABLE_IPV6" = "true" ] && echo "    listen [::]:${TCP_PORT};"
       echo "    set \$tcp_upstream \"${TARGET}\";"
       echo "    proxy_pass \$tcp_upstream;"
+      # Same reasoning as the http routes: a dead backend must not hold the
+      # connection for the default minute.
+      echo "    proxy_connect_timeout 5s;"
       [ "$TARGET_TLS" = "true" ] && echo "    proxy_ssl on;"
       echo "  }"
     done

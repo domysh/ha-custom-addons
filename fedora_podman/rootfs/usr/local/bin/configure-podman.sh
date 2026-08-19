@@ -536,6 +536,54 @@ ensure_dualstack_default_network() {
     fi
 }
 
+# An add-on's /config is the Supervisor directory app_configs/<slug>, and the
+# slug depends on where the add-on was installed from: a local folder gives
+# local_<name>, a repository gives <repository-hash>_<name>. Reinstalling from
+# the other source is therefore a *different* add-on as far as the Supervisor is
+# concerned - it gets an empty /config, while the old directory sits untouched
+# next to it with every image, container and installed package in it.
+#
+# Nothing is lost, but it looks exactly like it: the shell comes up with no
+# containers, no images and none of the packages that were installed. So when
+# the storage is empty, the neighbouring directories are checked - all of them
+# are mapped here at /app_configs - and what was found is named, along with how
+# to take it back.
+hint_at_orphaned_storage() {
+    local graphroot="$1"
+    local candidate found=()
+
+    # Only worth saying when this really is a fresh start: podman's graph root
+    # holds these once it has pulled anything at all.
+    [ -d "${graphroot}/overlay-images" ] && return 0
+    [ -d "${graphroot}/overlay-containers" ] && return 0
+    [ -d /app_configs ] || return 0
+
+    for candidate in /app_configs/*/podman /app_configs/*/system; do
+        [ -d "${candidate}" ] || continue
+        # Skip our own directory, whatever slug we happen to have.
+        [ "${candidate}" -ef "${graphroot}" ] && continue
+        [ "${candidate}" -ef "${PERSIST_DIR:-/config}/system" ] && continue
+        [ -n "$(ls -A "${candidate}" 2>/dev/null)" ] || continue
+        found+=("${candidate}")
+    done
+
+    [ "${#found[@]}" -gt 0 ] || return 0
+
+    warn "This add-on's storage is empty, but another add-on directory still holds"
+    warn "what looks like a previous installation of it:"
+    local path
+    for path in "${found[@]}"; do
+        warn "  ${path}  ($(du -sh "${path}" 2>/dev/null | cut -f1))"
+    done
+    warn "That happens when the add-on is reinstalled from a different source - a"
+    warn "local folder and a repository get different slugs, and the slug is the"
+    warn "name of this directory - so the old data is intact under the old name."
+    warn "To take it back, stop this add-on and move the directories over, e.g.:"
+    warn "  mv /app_configs/<old-slug>/podman /app_configs/<this-slug>/podman"
+    warn "  mv /app_configs/<old-slug>/system /app_configs/<this-slug>/system"
+    warn "Move them rather than copying: the system layer must not exist twice."
+}
+
 warn_on_low_space() {
     local graphroot="$1"
     local avail_mb
@@ -553,6 +601,7 @@ configure_podman() {
     chmod 0700 "${graphroot}"
 
     assert_path_is_persistent "${graphroot}"
+    hint_at_orphaned_storage "${graphroot}"
     configure_cgroups
     configure_procfs
     select_storage_driver "${graphroot}"
