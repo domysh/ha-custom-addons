@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.2
+
+- Stop quickly, instead of waiting and then being killed. Shutdown asked nginx
+  to quit gracefully, which waits for every request in flight — and a backend
+  that is down keeps requests in flight for as long as their timeouts allow, so
+  with clients retrying against one the wait never ended. The Supervisor allows
+  ten seconds before SIGKILL, and that kill is what was reported as a failure.
+  nginx is now told to shut down fast, anything still alive after three seconds
+  is killed, and the add-on exits cleanly well inside the window.
+
 ## 1.0.1
 
 - Report a clean shutdown as a clean shutdown. The entrypoint is PID 1, and its

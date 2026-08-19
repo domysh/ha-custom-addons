@@ -11,22 +11,45 @@ PIDS=()
 term_handler() {
   trap - TERM INT
 
-  # nginx first, and by asking rather than killing: `quit` is its graceful
-  # shutdown, which finishes the requests in flight instead of cutting them.
+  # A *fast* shutdown, deliberately not a graceful one. `nginx -s quit` waits
+  # for every request in flight to finish, and a request stuck on an
+  # unreachable backend keeps it waiting for as long as that request's timeouts
+  # allow - so with one dead backend being retried by its clients, the quit
+  # never completes. The Supervisor gives the container ten seconds before
+  # SIGKILL, and being killed is what gets reported as a crash. `nginx -s stop`
+  # terminates the workers at once; a request cut here was about to be cut by
+  # the stop in any case.
   if [ -s /var/run/nginx.pid ]; then
-    nginx -s quit 2>/dev/null || true
-    for _ in $(seq 1 10); do
-      [ -s /var/run/nginx.pid ] || break
-      sleep 1
-    done
+    nginx -s stop 2>/dev/null || true
   fi
 
   for pid in "${PIDS[@]}"; do
     kill "$pid" 2>/dev/null || true
   done
+
+  # Three seconds is generous for processes that have already been told to go,
+  # and leaves the rest of the ten second window as margin.
+  local waited=0 pid alive
+  while [ "${waited}" -lt 3 ]; do
+    alive=""
+    for pid in "${PIDS[@]}"; do
+      kill -0 "$pid" 2>/dev/null && alive="yes"
+    done
+    [ -n "${alive}" ] || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  # Whatever is left is not leaving on its own, and waiting for it only turns
+  # a clean stop into a killed container.
+  for pid in "${PIDS[@]}"; do
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+
   wait 2>/dev/null || true
   exit 0
 }
+
 trap term_handler TERM INT
 
 /generate-nginx-conf.sh
