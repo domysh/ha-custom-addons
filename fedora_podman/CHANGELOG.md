@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.2
+
+- Fix containers failing to start with `enabling controller cpuset: ...
+  cgroup.subtree_control: no such file or directory`. Podman reads
+  `/sys/fs/cgroup/cgroup.controllers` and writes that whole list into every
+  container's cgroup without checking which controllers are actually
+  delegated, so one controller missing from the add-on's own
+  `cgroup.subtree_control` fails the container outright — naming the first
+  controller in the list, `cpuset`, whatever the real cause. The delegation
+  that has to happen first was too fragile: cgroup.procs is generated on read
+  and shifts as processes are moved out of it, so a single sweep left
+  stragglers behind, and the kernel refuses to delegate while any process
+  remains in the cgroup root. The processes are now moved out in repeated
+  sweeps until none is left, and a transient `EBUSY` is retried.
+- Report what actually happened. Delegation failures were discarded, leaving
+  the add-on log claiming success while every container start failed with an
+  error that names the container's cgroup rather than the add-on's. Each
+  controller that could not be delegated is now listed with the kernel's own
+  reason, and what it means for containers.
+- `podman-diag` shows `cgroup.controllers` against `cgroup.subtree_control` and
+  names the difference, along with any process left in the cgroup root.
+
 ## 1.0.1
 
 - Fix an empty `/etc/resolv.conf`, which left the shell with no name resolution

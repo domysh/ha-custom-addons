@@ -27,6 +27,33 @@ run "podman info --format '{{printf \"cgroup version : %s\" .Host.CgroupsVersion
 run "podman info --format '{{printf \"network backend: %s\" .Host.NetworkBackend}}'"
 run "podman info --format '{{printf \"log driver     : %s\" .Host.LogDriver}}'"
 
+section "cgroups"
+# Podman enables every controller listed in cgroup.controllers on each
+# container's cgroup, without checking what is delegated - so a controller that
+# is in the first line below and missing from the second fails every container
+# start with "enabling controller <name>: ... no such file or directory",
+# naming the container's cgroup rather than this one.
+run "cat /sys/fs/cgroup/cgroup.controllers"
+run "cat /sys/fs/cgroup/cgroup.subtree_control"
+run "cat /sys/fs/cgroup/cgroup.procs | head -5"
+missing=""
+# Word splitting is the point here: cgroup.controllers is one line of
+# space-separated names, not one name per line.
+# shellcheck disable=SC2013
+for c in $(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null); do
+    grep -qw "${c}" /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || missing="${missing} ${c}"
+done
+if [ -n "${missing}" ]; then
+    echo
+    echo "  NOT DELEGATED:${missing}"
+    echo "  Containers will fail to start until these are enabled. A process left"
+    echo "  in the cgroup root is the usual cause (the kernel refuses delegation"
+    echo "  while one is there); the third command above shows any."
+else
+    echo
+    echo "  Every advertised controller is delegated."
+fi
+
 section "Containers"
 run "podman ps --all --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Networks}}'"
 

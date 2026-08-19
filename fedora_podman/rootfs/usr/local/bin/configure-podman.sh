@@ -271,50 +271,90 @@ configure_cgroups() {
 
     # The "no internal processes" rule forbids enabling controllers for
     # children while the cgroup itself still holds processes - and ours all sit
-    # in the container's cgroup root. Moving them into a child cgroup first is
-    # what makes delegation possible. Entirely best-effort: containers still
-    # run without it, they just cannot be given resource limits.
+    # in the container's cgroup root. They have to be moved into a child cgroup
+    # first, and moving them is not a single pass: cgroup.procs is generated on
+    # read, so the list shifts under the reader as PIDs leave it and one sweep
+    # reliably leaves some behind. One straggler is enough to make every
+    # delegation below fail with EBUSY.
     if [ -w "${cg}/cgroup.procs" ]; then
         mkdir -p "${cg}/addon" 2>/dev/null || true
-        while read -r pid; do
-            echo "${pid}" > "${cg}/addon/cgroup.procs" 2>/dev/null || true
-        done < "${cg}/cgroup.procs"
+        local sweep=0
+        while [ "${sweep}" -lt 20 ]; do
+            while read -r pid; do
+                [ -n "${pid}" ] || continue
+                echo "${pid}" > "${cg}/addon/cgroup.procs" 2>/dev/null || true
+            done < "${cg}/cgroup.procs"
+            # Not `[ -s ]`: kernel-generated files report a size of zero
+            # whatever they contain.
+            [ -n "$(cat "${cg}/cgroup.procs" 2>/dev/null)" ] || break
+            sweep=$((sweep + 1))
+        done
     fi
 
     # cgroup.controllers is a single line of space-separated names, so it is
     # read as words rather than lines.
-    local controllers=() controller enabled=""
+    # Every controller listed here has to end up in cgroup.subtree_control,
+    # not just the ones we care about: Podman reads this same file to decide
+    # what to enable for each container, and writes the whole list into the
+    # container's cgroup without checking what is actually delegated. One
+    # missing controller therefore fails the container outright - and it fails
+    # on the first name in this list, which is why the error usually says
+    # "cpuset" whatever the real problem is.
+    local controllers=() controller enabled=() failed=() err=""
     read -r -a controllers < "${cg}/cgroup.controllers" || true
     for controller in "${controllers[@]}"; do
-        if echo "+${controller}" > "${cg}/cgroup.subtree_control" 2>/dev/null; then
-            enabled="${enabled} ${controller}"
+        # EBUSY here is often transient - the kernel reports it while the
+        # processes just moved out are still being accounted for - so a few
+        # attempts are worth making. Podman's own code retries it a thousand
+        # times for the same reason.
+        err=""
+        for _ in 1 2 3 4 5; do
+            if err="$( { echo "+${controller}" > "${cg}/cgroup.subtree_control"; } 2>&1 )"; then
+                err=""
+                break
+            fi
+            case "${err}" in
+                *"busy"* | *"Busy"*) sleep 0.2 ;;
+                *) break ;;
+            esac
+        done
+
+        if [ -z "${err}" ]; then
+            enabled+=("${controller}")
+        else
+            # Kept and reported rather than swallowed: a controller that is
+            # advertised here but not delegated is exactly what makes a
+            # container fail later with
+            #   enabling controller <name>: ... cgroup.subtree_control:
+            #   no such file or directory
+            # which names the container's own cgroup and gives no hint that the
+            # cause is one level up, here.
+            failed+=("${controller}")
+            [ -n "${err}" ] && err="${err##*: }"
         fi
     done
 
-    if [ -n "${enabled}" ]; then
-        log "Delegated cgroup controllers to containers:${enabled}"
-    else
+    if [ "${#enabled[@]}" -gt 0 ]; then
+        log "Delegated cgroup controllers to containers: ${enabled[*]}"
+    fi
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        warn "These cgroup controllers could not be delegated: ${failed[*]}"
+        [ -n "${err}" ] && warn "The kernel's reason: ${err}"
+        warn "Containers will not start at all while this is the case, because Podman"
+        warn "enables every controller this cgroup advertises, whether or not the"
+        warn "container needs it."
+        warn "Containers that need one of them fail to start with 'enabling controller"
+        warn "<name>: ... cgroup.subtree_control: no such file or directory', which"
+        warn "names the container's own cgroup rather than this one."
+        warn "'Device or resource busy' means a process is still in the cgroup root;"
+        warn "anything else usually means the Supervisor's Docker did not delegate the"
+        warn "controller to this container in the first place, and Protection mode"
+        warn "being on is the usual cause."
+    elif [ "${#enabled[@]}" -eq 0 ]; then
         warn "No cgroup controllers could be delegated; containers will run but"
         warn "resource limits (--memory, --cpus) will not be enforced."
     fi
-}
-
-# netavark configures each bridge it creates through sysctls (route_localnet,
-# forwarding, and so on). Docker mounts /proc/sys read-only in every container
-# that is not truly privileged - the same reason /sys/fs/cgroup is read-only
-# above - so those writes fail and the container never starts:
-#
-#   Error: unable to start container "...": netavark:
-#   set sysctl net/ipv4/conf/podman1/route_localnet:
-#   IO error: Read-only file system (os error 30)
-#
-# Remounting read-write is permitted with CAP_SYS_ADMIN. Worth being explicit
-# about the consequence: this add-on shares the host's network namespace, so
-# /proc/sys/net *is* the host's network configuration. Podman's bridges and
-# their sysctls are therefore created on the host - that is inherent to running
-# with host networking, not something this remount introduces.
-procfs_net_is_writable() {
-    [ -w /proc/sys/net/ipv4 ]
 }
 
 configure_procfs() {
