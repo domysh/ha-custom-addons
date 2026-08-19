@@ -1,0 +1,13 @@
+# Architecture -> base image mapping. The Supervisor passes the selected image
+# to the Dockerfile as the BUILD_FROM build argument.
+#
+# Pinned to a Fedora *major* version rather than :latest, so a new Fedora
+# release never lands on the Pi unannounced (Podman, crun and netavark change
+# behaviour across releases, and this add-on depends on their details).
+# Deliberately NOT pinned to an image digest: the add-on is rebuilt locally on
+# the device, and a digest pin would freeze the base image's security updates
+# while the packages installed on top would keep floating anyway. Bump the
+# major version here by hand when you want to move to a new Fedora.
+build_from:
+  aarch64: "docker.io/library/fedora:44"
+  amd64: "docker.io/library/fedora:44"

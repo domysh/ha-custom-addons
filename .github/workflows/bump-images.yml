@@ -1,0 +1,91 @@
+name: bump-images
+
+# Keeps the pinned upstream image tags current: once a day, and on demand from
+# the Actions tab.
+#
+# An add-on pins its base image in <addon>/Dockerfile, and Home Assistant only
+# offers an update when the add-on's own version field in <addon>/config.yaml
+# changes too - so both move together here, or the new image would never reach
+# an installed add-on.
+#
+# Fedora's release in fedora_podman/build.yaml is deliberately not bumped here.
+# A new base image invalidates the add-on's persistent system layer, which is
+# a decision to take deliberately rather than at 06:00 on a Tuesday.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily, 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-images
+
+jobs:
+  addons:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # version_strategy:
+        #   tag        - the add-on's version follows the image tag one to one,
+        #                because the add-on is a thin wrapper around that
+        #                program and nothing else.
+        #   patch-bump - the add-on's version has a scheme of its own (it
+        #                describes the work in the add-on, not the base image),
+        #                so it is only incremented by a patch. Otherwise an
+        #                nginx bump would rewrite "1.0.0" as "1.31.4-alpine",
+        #                which is not this add-on's version.
+        include:
+          - addon: tls_proxy
+            image: nginx
+            tag_regex: '^[0-9]+\.[0-9]+\.[0-9]+-alpine$'
+            version_strategy: patch-bump
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install skopeo
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq skopeo jq
+
+      - name: Check for a newer upstream tag
+        id: check
+        run: |
+          set -euo pipefail
+          CURRENT=$(grep -oP "(?<=^FROM ${{ matrix.image }}:)\S+" "${{ matrix.addon }}/Dockerfile")
+          LATEST=$(skopeo list-tags "docker://${{ matrix.image }}" \
+            | jq -r '.Tags[]' \
+            | grep -E '${{ matrix.tag_regex }}' \
+            | sort -V | tail -n1)
+          if [ -z "$LATEST" ]; then
+            echo "No tag on the registry matched the expected pattern, skipping." >&2
+            exit 1
+          fi
+          echo "Current: $CURRENT - Latest upstream: $LATEST"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Dockerfile and config.yaml, commit, push
+        if: steps.check.outputs.current != steps.check.outputs.latest
+        run: |
+          set -euo pipefail
+          CURRENT="${{ steps.check.outputs.current }}"
+          LATEST="${{ steps.check.outputs.latest }}"
+
+          if [ "${{ matrix.version_strategy }}" = "patch-bump" ]; then
+            OLD_VERSION=$(grep -oP '(?<=^version: ")[^"]+' "${{ matrix.addon }}/config.yaml")
+            CONFIG_VERSION=$(awk -F. -v OFS=. '{ $NF = $NF + 1; print }' <<< "$OLD_VERSION")
+          else
+            CONFIG_VERSION="${LATEST#v}" # strip a leading "v" for the version field
+          fi
+
+          sed -i "s#${{ matrix.image }}:${CURRENT}#${{ matrix.image }}:${LATEST}#" "${{ matrix.addon }}/Dockerfile"
+          sed -i "s#version: \".*\"#version: \"${CONFIG_VERSION}\"#" "${{ matrix.addon }}/config.yaml"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ matrix.addon }}/Dockerfile" "${{ matrix.addon }}/config.yaml"
+          git commit -m "chore(${{ matrix.addon }}): bump to ${LATEST}"
+          git pull --rebase origin main
+          git push origin HEAD:main

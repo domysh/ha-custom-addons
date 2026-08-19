@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# One-shot state dump for the Fedora Podman Shell add-on.
+#
+# Container networking here spans three things that cannot see each other's
+# state: Podman's own configuration, the nftables rules netavark writes, and
+# the iptables rules the Supervisor's Docker owns - all in the *host's* network
+# namespace, because the add-on runs with host networking. When a published
+# port does not answer, the answer is in the overlap, so this prints all of it
+# at once instead of leaving it to be assembled by hand.
+#
+# Read-only: it changes nothing.
+set -uo pipefail
+
+section() { printf '\n===== %s =====\n' "$*"; }
+run() { printf '\n$ %s\n' "$*"; eval "$*" 2>&1 | sed 's/^/  /'; }
+
+section "Versions"
+run "podman --version"
+run "netavark --version || /usr/libexec/podman/netavark --version"
+run "aardvark-dns --version || /usr/libexec/podman/aardvark-dns --version"
+
+section "Podman configuration in effect"
+run "podman info --format '{{printf \"storage driver : %s\" .Store.GraphDriverName}}'"
+run "podman info --format '{{printf \"graph root     : %s\" .Store.GraphRoot}}'"
+run "podman info --format '{{printf \"cgroup manager : %s\" .Host.CgroupManager}}'"
+run "podman info --format '{{printf \"cgroup version : %s\" .Host.CgroupsVersion}}'"
+run "podman info --format '{{printf \"network backend: %s\" .Host.NetworkBackend}}'"
+run "podman info --format '{{printf \"log driver     : %s\" .Host.LogDriver}}'"
+
+section "Containers"
+run "podman ps --all --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Networks}}'"
+
+section "Logging"
+# The most common reason `podman logs` comes back empty is a log driver that
+# writes somewhere unreachable from this container, so name the driver each
+# container was actually created with - it is fixed at creation and does not
+# change when the configuration does.
+run "podman ps --all --format '{{.Names}}' | while read -r c; do [ -n \"\$c\" ] && printf '%s: %s\n' \"\$c\" \"\$(podman inspect --format '{{.HostConfig.LogConfig.Type}}' \"\$c\" 2>&1)\"; done"
+
+section "Podman networks"
+run "podman network ls"
+# Whether each network is dual-stack is the single most useful fact about it
+# here, and `network ls` does not show it. A container on an IPv4-only network
+# gets no IPv6 address, so netavark writes no IPv6 DNAT rule for it and its
+# published ports are invisible over IPv6 - which is a configuration fact, not
+# something the probes below can fix.
+echo
+printf '  %-24s %s\n' "NETWORK" "IP FAMILIES"
+for net in $(podman network ls --format '{{.Name}}' 2>/dev/null); do
+    if [ "$(podman network inspect "${net}" 2>/dev/null | jq -r '.[0].ipv6_enabled')" = "true" ]; then
+        printf '  %-24s %s\n' "${net}" "dual-stack"
+    else
+        printf '  %-24s %s\n' "${net}" "IPv4 only"
+    fi
+done
+cat <<'HINT'
+
+  An IPv4-only network cannot be converted: enable_ipv6 and --ipv6 apply when a
+  network is created, and both `up -d` and `podman run` reuse whatever exists.
+  For a compose stack, recreate it - the data is in the mounted directories,
+  not in the containers:
+
+    cd /share/<stack> && podman-compose down && podman-compose up -d
+
+  `podman-compose down` only removes networks carrying its project label, so if
+  the network survives, remove it explicitly and bring the stack up again:
+
+    podman network rm <stack>_default
+
+  For containers started by hand, `podman rm` them and run them again; they
+  will land on the add-on's dual-stack default network.
+HINT
+run "ip -brief address show type bridge"
+
+section "Host forwarding state"
+run "cat /proc/sys/net/ipv4/ip_forward"
+run "cat /proc/sys/net/ipv6/conf/all/forwarding"
+
+section "Host firewall - iptables (Docker's view)"
+for cmd in iptables-nft iptables-legacy; do
+    command -v "${cmd}" >/dev/null 2>&1 || continue
+    if "${cmd}" -w 5 -S DOCKER-USER >/dev/null 2>&1; then
+        printf '\n--- %s (this is the backend Docker uses) ---\n' "${cmd}"
+        run "${cmd} -w 5 -S FORWARD"
+        run "${cmd} -w 5 -S DOCKER-USER"
+    else
+        printf '\n--- %s: no DOCKER-USER chain, not the backend in use ---\n' "${cmd}"
+    fi
+done
+
+section "Host firewall - nftables (netavark's view)"
+if command -v nft >/dev/null 2>&1; then
+    run "nft list tables"
+    run "nft list table inet netavark"
+else
+    echo "  nft is not installed"
+fi
+
+section "Published ports: where the path breaks"
+# A published port crosses three hops, and each fails differently:
+#   1. the container itself listening on its port,
+#   2. the host reaching it through the bridge (no NAT involved),
+#   3. the DNAT rule netavark installed for the published port.
+# Testing all three says which one is broken instead of leaving "it does not
+# answer" to be guessed at. Connect-only probes: nothing is sent.
+probe() {
+    timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null && echo "OK" || echo "FAIL"
+}
+
+host_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
+# The global IPv6 address, not a link-local one: link-local needs a scope and
+# is not what a client connects to.
+host_ip6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
+echo "  This host on the LAN: ${host_ip:-unknown}"
+echo "  This host over IPv6 : ${host_ip6:-none (the host has no global IPv6 address)}"
+echo
+
+for ctr in $(podman ps --format '{{.Names}}' 2>/dev/null); do
+    ctr_ip="$(podman inspect "${ctr}" \
+        --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null \
+        | awk '{print $1}')"
+    ctr_ip6="$(podman inspect "${ctr}" \
+        --format '{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}} {{end}}' 2>/dev/null \
+        | awk '{print $1}')"
+    ports_json="$(podman inspect "${ctr}" --format '{{json .NetworkSettings.Ports}}' 2>/dev/null)"
+    case "${ports_json}" in
+        "" | null | "{}") continue ;;
+    esac
+
+    printf '  %s (v4 %s, v6 %s)\n' "${ctr}" "${ctr_ip:-none}" "${ctr_ip6:-none - IPv4-only network}"
+    # HostIp is read but not probed: what it says the port is bound to matters
+    # less than whether a connection to it actually completes, which is what
+    # the two probes below measure.
+    while IFS=' ' read -r cport proto _hostip hostport; do
+
+        [ "${proto}" = "tcp" ] || { printf '    %-9s -> %-5s | (udp, not probed)\n' "${cport}/${proto}" "${hostport}"; continue; }
+
+        direct="n/a"
+        [ -n "${ctr_ip}" ] && direct="$(probe "${ctr_ip}" "${cport}")"
+        local_p="$(probe 127.0.0.1 "${hostport}")"
+        lan_p="n/a"
+        [ -n "${host_ip}" ] && lan_p="$(probe "${host_ip}" "${hostport}")"
+        v6_p="n/a"
+        [ -n "${host_ip6}" ] && v6_p="$(probe "${host_ip6}" "${hostport}")"
+
+        printf '    %-9s -> %-5s | container %-4s | v4 local %-4s | v4 lan %-4s | v6 %s\n' \
+            "${cport}/${proto}" "${hostport}" "${direct}" "${local_p}" "${lan_p}" "${v6_p}"
+    done < <(printf '%s' "${ports_json}" | jq -r '
+        to_entries[] as $e
+        | $e.value[]?
+        | "\($e.key | split("/")[0]) \($e.key | split("/")[1]) \(.HostIp) \(.HostPort)"')
+    echo
+done
+
+cat <<'HINT'
+  How to read that line:
+    container FAIL          the service is not listening inside the container.
+                            Nothing outside can help: check `podman logs`, and
+                            that it binds 0.0.0.0 and not 127.0.0.1.
+    container OK, both host FAIL
+                            the container is fine and the port forwarding is
+                            not. Look at the DOCKER-USER rules above: Docker
+                            sets the FORWARD policy to DROP and netavark's
+                            ACCEPT lives in a different table, so without those
+                            rules the packets are dropped with no error.
+    v4 local OK, v4 lan FAIL
+                            forwarding works locally; something outside this
+                            host is in the way, or the port was published to
+                            127.0.0.1 on purpose (which is right for anything
+                            meant to sit behind TLS Proxy).
+    v4 OK, v6 FAIL          the container has no IPv6 address, so netavark
+                            wrote no IPv6 DNAT rule for it - it only writes one
+                            when the container has an address in that family,
+                            and Podman has no userland proxy to bridge them.
+                            Check that its network is dual-stack:
+                              podman network inspect <net> | grep -i ipv6
+                            Containers created before the add-on's dual-stack
+                            default network existed keep the old one until they
+                            are recreated.
+    all OK                  the path is fine; if a client still cannot connect,
+                            the problem is DNS, the client's own network, or
+                            the service's own access rules.
+HINT
+
+section "Reachability of published ports"
+# A published port has no listening socket on the host: netavark uses DNAT, not
+# a userland proxy like Docker's, so `ss -lnt` showing nothing is expected and
+# is not the fault. What matters is whether a connection gets through.
+run "ss -lntu | head -30"
+echo
+echo "  To test a mapping, from here and then from another machine:"
+echo "    curl -sv http://127.0.0.1:<published-port>/"
+echo "    curl -sv http://<this-host-ip>:<published-port>/"

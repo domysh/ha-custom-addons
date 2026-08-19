@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# demo - prints the time every second, to see the machinery work.
+set -euo pipefail
+while :; do date; sleep 1; done

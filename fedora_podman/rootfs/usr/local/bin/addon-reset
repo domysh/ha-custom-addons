@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Reset parts of the Fedora Podman Shell add-on to their initial state.
+#
+# Why this queues a request instead of doing the work: most of what there is to
+# reset is in use by the shell you are typing in. /usr, /etc, /opt, /root and
+# /var are overlay mounts whose upper layer is the thing to delete, and you
+# cannot pull those out from under a running process - the shell itself lives
+# there. Podman's storage has containers running out of it. So the reset is
+# recorded here and carried out by the entrypoint at the next start, before any
+# of it is mounted or opened.
+#
+# The request lives in /data, which is the add-on's own Supervisor-managed
+# directory: it is not one of the things being reset, and it survives a restart
+# but not an uninstall.
+set -euo pipefail
+
+REQUEST_FILE="/data/reset-request"
+OPTIONS_FILE="/data/options.json"
+
+storage_path() {
+    jq -r '.podman_storage_path // "/config/podman"' "${OPTIONS_FILE}" 2>/dev/null \
+        || printf '/config/podman\n'
+}
+
+describe() {
+    case "$1" in
+        podman)
+            printf 'Podman storage (%s): every image, container, volume and\n' "$(storage_path)"
+            printf '             user-defined network, and the autostart record with them.\n'
+            ;;
+        system)
+            printf 'Persistent system layer (/config/system, and any retired\n'
+            printf '             /config/system.fedora-* left by a base image change): every\n'
+            printf '             package installed with dnf, every edit to /etc, /root and /opt.\n'
+            ;;
+        autostart)
+            printf 'Autostart record only: the add-on will stop bringing back the\n'
+            printf '             containers that were running. Nothing else is touched.\n'
+            ;;
+        ssh)
+            printf "SSH host keys (/config/ssh): new ones are generated, so every\n"
+            printf '             client will refuse to connect until you clear the old\n'
+            printf "             fingerprint (ssh-keygen -R '[host]:port').\n"
+            ;;
+    esac
+}
+
+usage() {
+    cat <<'USAGE'
+Usage: addon-reset [--podman] [--system] [--autostart] [--ssh] [--all]
+       addon-reset --status | --cancel
+
+Queues a reset, carried out at the next add-on start. Nothing is deleted now.
+
+  --podman      images, containers, volumes, networks (the Podman storage)
+  --system      packages and configuration installed over SSH (/config/system)
+  --autostart   only the record of which containers were running
+  --ssh         SSH host keys, so new ones are generated
+  --all         all of the above
+  --yes         do not ask for confirmation
+  --status      show whether a reset is queued
+  --cancel      drop a queued reset
+
+After queuing, restart the add-on for it to happen:
+
+  ha addons restart fedora_podman
+
+Anything not listed here is reset by the add-on's own lifecycle: the container
+filesystem outside the persistent layer is rebuilt on every update, and the
+add-on options are reset by editing them in the Configuration tab.
+USAGE
+}
+
+main() {
+    local -a targets=()
+    local assume_yes="false" target
+
+    [ "$#" -gt 0 ] || { usage; exit 2; }
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --podman | --system | --autostart | --ssh) targets+=("${1#--}") ;;
+            --all) targets=(podman system autostart ssh) ;;
+            --yes | -y) assume_yes="true" ;;
+            --status)
+                if [ -s "${REQUEST_FILE}" ]; then
+                    echo "A reset is queued for the next add-on start:"
+                    sed 's/^/  - /' "${REQUEST_FILE}"
+                    echo
+                    echo "Drop it with: addon-reset --cancel"
+                else
+                    echo "No reset is queued."
+                fi
+                exit 0
+                ;;
+            --cancel)
+                if rm -f "${REQUEST_FILE}"; then
+                    echo "Queued reset dropped; nothing will be deleted at the next start."
+                fi
+                exit 0
+                ;;
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown argument: $1" >&2
+                echo >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+        shift
+    done
+
+    if [ "${#targets[@]}" -eq 0 ]; then
+        echo "Nothing selected." >&2
+        echo >&2
+        usage >&2
+        exit 2
+    fi
+
+    # Duplicates are possible (--all --podman), and the order the entrypoint
+    # applies them in does not depend on this file, but a clean list makes the
+    # confirmation and --status output readable.
+    mapfile -t targets < <(printf '%s\n' "${targets[@]}" | sort -u)
+
+    echo "This will PERMANENTLY DELETE, at the next add-on start:"
+    echo
+    for target in "${targets[@]}"; do
+        printf '  %-10s %s\n' "${target}" "$(describe "${target}")"
+    done
+    echo
+    echo "There is no undo and no backup. The add-on will not start faster or"
+    echo "differently otherwise; only these are removed."
+    echo
+
+    if [ "${assume_yes}" != "true" ]; then
+        # Not a y/n: a single keystroke is too easy to hit by accident for
+        # something with no undo.
+        local answer
+        read -r -p "Type 'reset' to confirm: " answer
+        if [ "${answer}" != "reset" ]; then
+            echo "Cancelled; nothing was queued."
+            exit 1
+        fi
+    fi
+
+    printf '%s\n' "${targets[@]}" > "${REQUEST_FILE}.tmp"
+    mv "${REQUEST_FILE}.tmp" "${REQUEST_FILE}"
+
+    echo
+    echo "Queued. It happens at the next start, and only once:"
+    echo
+    echo "  ha addons restart fedora_podman"
+    echo
+    echo "Change your mind with: addon-reset --cancel"
+}
+
+main "$@"

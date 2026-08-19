@@ -1,0 +1,124 @@
+name: "Fedora Podman Shell"
+version: "1.0.0"
+slug: "fedora_podman"
+description: "Fedora shell environment with Podman, reachable over SSH, for running your own containers next to (but isolated from) the Supervisor's Docker engine."
+url: "https://github.com/domysh/ha-custom-addons"
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: manual
+# Docker's own init (tini) runs as PID 1 and reaps orphans. This matters here:
+# when podman exits, the conmon processes supervising your containers are
+# reparented to PID 1, and sshd - our foreground process - only reaps its own
+# children. Without an init, those would pile up as zombies.
+init: true
+
+# --- Host access -------------------------------------------------------------
+# host_network: sshd binds directly on the host's network stack, so the add-on
+# is reachable on the LAN without port mapping, and containers you publish
+# ports for are reachable the same way. It also means port collisions are real:
+# the configured SSH port must be free on the host.
+host_network: true
+# Shares the host's PID namespace. Podman itself does not need this, but it is
+# the only way to reach the host's filesystem: an add-on manifest cannot
+# declare an arbitrary bind mount (the Supervisor builds the mount list from a
+# fixed set of map types), so /host is a symlink to /proc/1/root - the root
+# directory of PID 1, which with this enabled is the host's init. The kernel
+# resolves paths under that magic link inside the host's own mount namespace,
+# so the host's submounts (/mnt/data and the rest) are reachable through it; a
+# bind mount is not equivalent and does not work here, see DOCS.md. It also
+# makes host processes visible to tools like htop and to `nsenter`.
+#
+# The cost is real and deliberate: host processes are visible from in here, and
+# anything in this add-on can write to the host's filesystem. That is the point
+# of the add-on, but it is also why it must not be exposed to anyone you would
+# not hand the root password to.
+host_pid: true
+# Full device access (device cgroup rule "a *:* rwm"), so USB and other
+# hardware can be passed into Podman containers. NOTE: this - like docker_api
+# below - is silently ignored by the Supervisor unless Protection mode is
+# turned off for this add-on. See DOCS.md.
+full_access: true
+# Mounts the host's /run/docker.sock, for *inspecting* the Supervisor's Docker.
+# Podman does not use it and never writes to it; see DOCS.md.
+docker_api: true
+# Gives the add-on a SUPERVISOR_TOKEN, which is what the bundled `ha` CLI
+# authenticates with. Without it `ha` is installed but every command fails.
+hassio_api: true
+# `ha` is only as capable as the role allows: with the default role most
+# subcommands (add-ons, supervisor, host, backups) return 403. "admin" is what
+# makes it behave like the same command in the official SSH add-on. It is a
+# deliberate grant, and on an add-on that already has full device access and
+# the host filesystem it does not widen the blast radius meaningfully.
+hassio_role: admin
+# The default AppArmor profile denies mount(2) and pivot_root(2), which the
+# container runtime (crun) needs for every container it starts. Nested
+# containers therefore cannot work with it enabled.
+apparmor: false
+# Bind-mounts the host's /lib/modules read-only and adds SYS_MODULE, so
+# `modprobe overlay` / `modprobe fuse` work if those are modules rather than
+# built in on your board.
+kernel_modules: true
+# Provides the host's udev database (/run/udev), so devices passed into
+# containers can be identified by their udev properties and not just by node.
+udev: true
+# full_access grants *device* access; it does not grant capabilities. These are
+# added on top of Docker's default set, each for a specific reason:
+#   SYS_ADMIN       - mount(2): overlay/fuse-overlayfs mounts, and the mount
+#                     namespace setup every container start performs.
+#   NET_ADMIN       - netavark creating bridges, veth pairs and firewall rules
+#                     for Podman networks.
+#   SYS_RESOURCE    - raising rlimits for containers (podman run --ulimit).
+#   SYS_PTRACE      - `podman exec`/`podman top` inspecting container processes.
+#   DAC_READ_SEARCH - reading image layer trees whose ownership comes from the
+#                     image, not from this container's root.
+# (SYS_CHROOT, MKNOD and SETFCAP are already in Docker's default set.)
+privileged:
+  - SYS_ADMIN
+  - NET_ADMIN
+  - SYS_RESOURCE
+  - SYS_PTRACE
+  - DAC_READ_SEARCH
+
+# --- Mapped host paths -------------------------------------------------------
+# Uses the current `app_config` / `all_app_configs` names, which replaced
+# `addon_config` / `all_addon_configs` when the Supervisor renamed add-ons to
+# apps. This REQUIRES Supervisor 2026.07.1 or newer (2026.07.0 does not have
+# them yet): older releases do not know
+# the new names and reject this manifest outright, so the add-on will not
+# install on them. Container mount points: app_config -> /config,
+# homeassistant_config -> /homeassistant, all_app_configs -> /app_configs.
+map:
+  - type: app_config
+    read_only: false
+  - type: homeassistant_config
+    read_only: false
+  - type: all_app_configs
+    read_only: false
+  - type: share
+    read_only: false
+  - type: ssl
+    read_only: false
+  - type: media
+    read_only: false
+  - type: backup
+    read_only: false
+
+options:
+  ssh_port: 2222
+  authorized_keys: []
+  timezone: "Europe/Rome"
+  podman_storage_path: "/config/podman"
+  autostart_containers: true
+  startup_compose_file: ""
+  startup_command: ""
+schema:
+  ssh_port: port
+  authorized_keys:
+    - str
+  timezone: str
+  podman_storage_path: str
+  autostart_containers: bool
+  startup_compose_file: str?
+  startup_command: str?

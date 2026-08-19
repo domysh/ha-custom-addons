@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Not systemd. This exists because `systemctl start something` is the first
+# thing anyone tries in a shell that looks this much like a normal Fedora, and
+# "command not found" explains nothing about what to do instead.
+#
+# If a real systemctl ever turns up - someone installs the systemd package -
+# defer to it rather than standing in its way. It still will not work (systemd
+# is not PID 1 here and cannot be), but that is then its own error to give.
+set -uo pipefail
+
+for real in /usr/bin/systemctl /bin/systemctl; do
+    if [ -x "${real}" ] && [ "${real}" != "$0" ]; then
+        exec "${real}" "$@"
+    fi
+done
+
+cat >&2 <<'MESSAGE'
+There is no systemd in this add-on, so systemctl cannot work: this is a
+Supervisor-managed container whose lifecycle Home Assistant owns, and PID 1 is
+a minimal init, not systemd. Unit files that packages install are inert.
+
+Background daemons are managed with addon-service instead. A service is an
+executable file in /config/services that runs in the foreground; the add-on
+starts it at boot and restarts it if it exits:
+
+  addon-service examples          ready-made ones, tailscaled included
+  addon-service install <name>    copy one into /config/services
+  addon-service list              what exists and what is running
+  addon-service start|stop <name>
+  addon-service logs <name> -f
+
+For a daemon with no ready-made service, the ExecStart line of the unit file
+the package shipped is usually the whole content of the script - as long as it
+stays in the foreground. See the add-on documentation, "Running your own
+daemons".
+MESSAGE
+exit 1
