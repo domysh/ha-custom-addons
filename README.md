@@ -3,7 +3,7 @@
 Two add-ons for Home Assistant OS: a TLS reverse proxy, and a Fedora shell with
 Podman for running your own containers alongside Home Assistant.
 
-| | | |
+| Logo | Name | Description |
 |---|---|---|
 | <img src="tls_proxy/icon.png" width="72"> | **[TLS Proxy](tls_proxy)** | nginx terminating TLS on one port and routing to internal backends by domain, using the certificate from the official Let's Encrypt add-on. Optional failover with keepalived and a virtual IP. |
 | <img src="fedora_podman/icon.png" width="72"> | **[Fedora Podman Shell](fedora_podman)** | A Fedora root shell over SSH with Podman, for running your own containers next to — but isolated from — the Supervisor's Docker. Persistent packages, the host filesystem at `/host`, background daemons without systemd. |
