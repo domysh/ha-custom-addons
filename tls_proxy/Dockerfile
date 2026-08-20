@@ -1,4 +1,4 @@
-FROM nginx:1.31.3-alpine
+FROM nginx:1.31.4-alpine
 LABEL io.hass.type="addon"
 
 RUN apk add --no-cache bash jq keepalived
