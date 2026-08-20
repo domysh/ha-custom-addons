@@ -624,6 +624,46 @@ hint_at_orphaned_storage() {
     warn "Move them rather than copying: the system layer must not exist twice."
 }
 
+# netavark's firewall rules outlive the containers they belong to. It removes
+# them when a container stops, but nothing stops the containers when the add-on
+# is killed or the host loses power - and this add-on shares the host's network
+# namespace, so the rules stay in the host's nftables ruleset across restarts.
+#
+# They then accumulate, and this is not merely untidy: NETAVARK-HOSTPORT-DNAT
+# is evaluated in order, and the rules from a destroyed network sit *before*
+# the ones netavark adds for the new containers. A published port is then
+# translated to a container address that no longer exists, and traffic
+# disappears into it. The symptom is a service that answers on one address
+# family and black-holes on the other, or connections to a published port
+# timing out (rather than being refused) with everything apparently configured
+# correctly.
+#
+# At start-up none of our containers can be running - the Supervisor kills them
+# with the add-on - so the whole table is ours to drop. netavark rebuilds it
+# from scratch when the first container starts.
+cleanup_stale_netavark_rules() {
+    command -v nft >/dev/null 2>&1 || return 0
+
+    # Same belt-and-braces check as the bridge cleanup: never touch the ruleset
+    # while a container could be relying on it.
+    if [ "$(podman ps --quiet 2>/dev/null | wc -l)" -gt 0 ]; then
+        return 0
+    fi
+
+    nft list table inet netavark >/dev/null 2>&1 || return 0
+
+    if nft delete table inet netavark 2>/dev/null; then
+        log "Removed netavark's leftover firewall rules from the host's nftables"
+        log "ruleset; they are rebuilt as containers start. Rules from a network that"
+        log "no longer exists would otherwise be matched first and send traffic to"
+        log "container addresses that are gone."
+    else
+        warn "Could not remove the stale 'inet netavark' nftables table."
+        warn "Published ports may be translated to container addresses that no longer"
+        warn "exist. Inspect it with: nft list table inet netavark"
+    fi
+}
+
 warn_on_low_space() {
     local graphroot="$1"
     local avail_mb
@@ -649,6 +689,7 @@ configure_podman() {
     write_containers_conf "${graphroot}"
     write_registries_conf
     cleanup_stale_podman_bridges
+    cleanup_stale_netavark_rules
     enable_ip_forwarding
     ensure_dualstack_default_network
     allow_podman_forwarding

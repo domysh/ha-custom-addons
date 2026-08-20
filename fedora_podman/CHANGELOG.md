@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.3
+
+- Drop netavark's leftover firewall rules at start-up. netavark removes a
+  container's rules when it stops, but nothing stops the containers when the
+  add-on is killed or the machine loses power — and since the add-on shares the
+  host's network namespace, those rules stay in the host's nftables ruleset and
+  accumulate. This is not merely untidy: `NETAVARK-HOSTPORT-DNAT` is evaluated
+  in order, so rules belonging to a destroyed network are matched *before* the
+  live ones and translate a published port to a container address that no
+  longer exists. The port then times out instead of being refused, or answers
+  on one address family while black-holing the other. At start-up no container
+  of ours can be running, so the table is dropped and netavark rebuilds it.
+- `podman-diag` names netavark chains whose network no longer exists, rather
+  than leaving them to be spotted in the full ruleset dump.
+- `podman-diag` shows the host address each port is published on, and explains
+  the IPv6 result in terms of it. netavark writes rules for an address family
+  only when the port is bound to an address of that family, so a port published
+  on `127.0.0.1` or `0.0.0.0` has no IPv6 rules by design — the previous text
+  blamed the container's own address, which sent the reader looking in the
+  wrong place.
+
 ## 1.0.2
 
 - Fix containers failing to start with `enabling controller cpuset: ...

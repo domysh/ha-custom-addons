@@ -118,6 +118,34 @@ done
 section "Host firewall - nftables (netavark's view)"
 if command -v nft >/dev/null 2>&1; then
     run "nft list tables"
+
+    # netavark names its per-network chains nv_<first 8 chars of the network
+    # id>_..., and its rules survive a container that was killed rather than
+    # stopped - this add-on shares the host's network namespace, so they stay
+    # in the host's ruleset. Rules from a network that no longer exists are
+    # matched *before* the live ones, and send traffic to container addresses
+    # that are gone, so naming them is worth more than the whole dump below.
+    live="$(podman network ls --format '{{.ID}}' 2>/dev/null | cut -c1-8 | sort -u)"
+    seen="$(nft list table inet netavark 2>/dev/null \
+        | grep -oE 'nv_[0-9a-f]{8}_' | cut -c4-11 | sort -u)"
+    stale=""
+    for id in ${seen}; do
+        grep -qx "${id}" <<< "${live}" || stale="${stale} ${id}"
+    done
+    if [ -n "${stale}" ]; then
+        echo
+        echo "  STALE RULES from networks that no longer exist:${stale}"
+        echo "  These are matched before the rules of the current networks and send"
+        echo "  traffic to container addresses that are gone - a published port then"
+        echo "  times out, or works on one address family and black-holes on the other."
+        echo "  Stop every container and restart the add-on: start-up drops the table"
+        echo "  and netavark rebuilds it. To do it by hand, with nothing running:"
+        echo "    podman stop --all && nft delete table inet netavark"
+    else
+        echo
+        echo "  Every netavark chain belongs to a network that still exists."
+    fi
+
     run "nft list table inet netavark"
 else
     echo "  nft is not installed"
@@ -155,12 +183,11 @@ for ctr in $(podman ps --format '{{.Names}}' 2>/dev/null); do
     esac
 
     printf '  %s (v4 %s, v6 %s)\n' "${ctr}" "${ctr_ip:-none}" "${ctr_ip6:-none - IPv4-only network}"
-    # HostIp is read but not probed: what it says the port is bound to matters
-    # less than whether a connection to it actually completes, which is what
-    # the two probes below measure.
-    while IFS=' ' read -r cport proto _hostip hostport; do
+    # The host IP a port is published on is printed, because it decides which
+    # address families netavark writes rules for at all - see the legend.
+    while IFS=' ' read -r cport proto hostip hostport; do
 
-        [ "${proto}" = "tcp" ] || { printf '    %-9s -> %-5s | (udp, not probed)\n' "${cport}/${proto}" "${hostport}"; continue; }
+        [ "${proto}" = "tcp" ] || { printf '    %-9s -> %-21s | (udp, not probed)\n' "${cport}/${proto}" "${hostip:-*}:${hostport}"; continue; }
 
         direct="n/a"
         [ -n "${ctr_ip}" ] && direct="$(probe "${ctr_ip}" "${cport}")"
@@ -170,8 +197,8 @@ for ctr in $(podman ps --format '{{.Names}}' 2>/dev/null); do
         v6_p="n/a"
         [ -n "${host_ip6}" ] && v6_p="$(probe "${host_ip6}" "${hostport}")"
 
-        printf '    %-9s -> %-5s | container %-4s | v4 local %-4s | v4 lan %-4s | v6 %s\n' \
-            "${cport}/${proto}" "${hostport}" "${direct}" "${local_p}" "${lan_p}" "${v6_p}"
+        printf '    %-9s -> %-21s | container %-4s | v4 local %-4s | v4 lan %-4s | v6 %s\n' \
+            "${cport}/${proto}" "${hostip:-*}:${hostport}" "${direct}" "${local_p}" "${lan_p}" "${v6_p}"
     done < <(printf '%s' "${ports_json}" | jq -r '
         to_entries[] as $e
         | $e.value[]?
@@ -195,15 +222,23 @@ cat <<'HINT'
                             host is in the way, or the port was published to
                             127.0.0.1 on purpose (which is right for anything
                             meant to sit behind TLS Proxy).
-    v4 OK, v6 FAIL          the container has no IPv6 address, so netavark
-                            wrote no IPv6 DNAT rule for it - it only writes one
-                            when the container has an address in that family,
-                            and Podman has no userland proxy to bridge them.
-                            Check that its network is dual-stack:
-                              podman network inspect <net> | grep -i ipv6
-                            Containers created before the add-on's dual-stack
-                            default network existed keep the old one until they
-                            are recreated.
+    v4 OK, v6 FAIL          look at the host address the port is published on,
+                            in the second column. netavark writes rules for one
+                            address family only when the port is bound to an
+                            address of that family: a port published on
+                            127.0.0.1 or 0.0.0.0 gets IPv4 rules and no IPv6
+                            ones, deliberately, and its IPv6 dnat chain is left
+                            empty. That is correct for anything meant to be
+                            reached only through TLS Proxy, which does its own
+                            IPv6.
+                            To serve both, publish the port twice - once on
+                            127.0.0.1 (or 0.0.0.0) and once on [::1] (or [::]).
+                            A wildcard host address in a compose file, i.e. no
+                            address at all, already covers both.
+                            If the second column shows no address and IPv6 is
+                            still failing, then it is the container: check that
+                            it has an IPv6 address in the header line above, and
+                            that its network is dual-stack.
     all OK                  the path is fine; if a client still cannot connect,
                             the problem is DNS, the client's own network, or
                             the service's own access rules.
