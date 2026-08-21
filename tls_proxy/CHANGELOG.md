@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0
+
+- New per-route `grpc_paths`: path prefixes on an otherwise ordinary route that
+  are proxied as gRPC. A backend fronting several services commonly serves HTTP
+  and gRPC on one hostname, separated by path — a gRPC method is a path — and
+  `mode: grpc` could only be applied to a whole route. nginx matches the
+  longest prefix, so the two kinds of location coexist without ordering rules.
+- New per-route `backend_http2`, which proxies to the backend over HTTP/2
+  instead of HTTP/1.1. Off by default and per route: without TLS this is h2c
+  with prior knowledge, which a backend that speaks only HTTP/1.1 refuses
+  outright, and HTTP/2 has no `Upgrade` mechanism, so the websocket headers are
+  correctly omitted from such a route. Support is probed with `nginx -V`, and a
+  build that cannot do it falls back to HTTP/1.1 with a note in the log rather
+  than failing to start.
+
 ## 1.1.0
 
 - HTTP/2 on every HTTPS route, negotiated over ALPN so older clients are

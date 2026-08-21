@@ -1,5 +1,5 @@
 name: "TLS Proxy"
-version: "1.1.0"
+version: "1.2.0"
 slug: "tls_proxy"
 description: "TLS/HTTP reverse proxy (nginx): routes to internal services by domain, uses the certificate from the official Let's Encrypt add-on, optional failover with keepalived and a virtual IP."
 url: "https://github.com/domysh/ha-custom-addons"
@@ -52,6 +52,9 @@ schema:
     - domain: str
       target: str
       mode: list(http|tcp|grpc)?
+      grpc_paths:
+        - str?
+      backend_http2: bool?
       tcp_port: port?
       cert_file: str?
       key_file: str?

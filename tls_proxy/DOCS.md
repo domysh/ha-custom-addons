@@ -116,6 +116,41 @@ connections open long enough for streaming RPCs to idle between messages.
 The backend address may be a name, as for any other route: it is resolved at
 request time, so a backend that restarts on a new address needs no reload.
 
+**When one backend serves both.** A backend that fronts several services — a
+second proxy, for instance — usually serves ordinary HTTP and gRPC on the same
+hostname, told apart by path: a gRPC method *is* a path,
+`/package.Service/Method`. Naming those prefixes keeps the rest of the route
+ordinary:
+
+```yaml
+  - domain: "gateway.example.com"
+    target: "127.0.0.1:8080"
+    mode: "http"
+    grpc_paths:
+      - "/helloworld.Greeter/"
+      - "/package.Service/"
+```
+
+Each prefix gets a gRPC location and everything else stays on the normal one.
+nginx matches the longest prefix, so the order the routes are written in does
+not matter.
+
+**HTTP/2 to a backend that is not gRPC.** `backend_http2: true` makes the proxy
+speak HTTP/2 to that backend instead of HTTP/1.1:
+
+```yaml
+  - domain: "app.example.com"
+    target: "127.0.0.1:8080"
+    backend_http2: true
+```
+
+Off by default, and per route, for a reason: with `target_tls: false` this is
+h2c with prior knowledge, and a backend that only speaks HTTP/1.1 refuses the
+connection outright rather than negotiating down. HTTP/2 also has no `Upgrade`
+mechanism, so the websocket headers are dropped for such a route — do not set
+it on a route carrying websockets. It is not needed for gRPC: `mode: grpc` and
+`grpc_paths` already keep HTTP/2 end to end.
+
 ### Certificates per route
 
 `cert_file` and `key_file` at the top level (default `fullchain.pem` and
@@ -234,6 +269,8 @@ host.
 | `routes[].mode` | `http`/`tcp`/`grpc` | `http` | Terminate TLS and route by Host, pass a dedicated port through, or proxy gRPC end to end over HTTP/2. |
 | `routes[].tcp_port` | port | — | Required for `tcp`: the public port for this service. |
 | `routes[].cert_file` / `key_file` | str | *(global)* | Per-route certificate override. |
+| `routes[].grpc_paths` | list of str | *(empty)* | Path prefixes on this route proxied as gRPC, for a backend serving both. |
+| `routes[].backend_http2` | bool | `false` | Speak HTTP/2 to the backend rather than HTTP/1.1. Not for websocket routes. |
 | `routes[].enable_http` | bool | `false` | Also serve this route in the clear on `http_port`. |
 | `routes[].target_tls` | bool | `false` | Connect to the backend over HTTPS. |
 | `ha.*` | | | keepalived, see above. |

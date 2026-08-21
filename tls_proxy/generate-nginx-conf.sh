@@ -26,6 +26,15 @@ ENABLE_HTTP3=$(jq -r '.enable_http3 // true' "$OPTIONS")
 # "listen ... quic" in a binary without the module is a start-up failure, and
 # this add-on is the thing everything else is published through. Ask the binary
 # instead.
+# Speaking HTTP/2 *to* a backend is a separate capability from serving it, and
+# nginx accepts "proxy_http_version 2" only when built with HTTP/2 support.
+# Probed for the same reason as QUIC: an unsupported value is a start-up
+# failure, not a warning.
+USE_BACKEND_HTTP2=false
+if nginx -V 2>&1 | grep -q -- "--with-http_v2_module"; then
+  USE_BACKEND_HTTP2=true
+fi
+
 USE_HTTP3=false
 if [ "$ENABLE_HTTP3" = "true" ]; then
   if nginx -V 2>&1 | grep -q -- "--with-http_v3_module"; then
@@ -126,7 +135,7 @@ route_cert() {
 
 # The location block shared by every HTTP route, proxying to its backend.
 http_location() {
-  local target="$1" target_tls="$2"
+  local target="$1" target_tls="$2" backend_http2="${3:-false}"
   echo "    location / {"
   echo "      set \$upstream \"${target}\";"
   if [ "$target_tls" = "true" ]; then
@@ -138,14 +147,26 @@ http_location() {
   else
     echo "      proxy_pass http://\$upstream;"
   fi
+  if [ "$backend_http2" = "true" ] && [ "$USE_BACKEND_HTTP2" = "true" ]; then
+    # HTTP/2 all the way to the backend. What goes with it: HTTP/2 has no
+    # Upgrade mechanism, so the websocket headers below are not merely
+    # unnecessary but invalid, and are left out. A backend that does not speak
+    # h2c refuses the connection outright, which is why this is per route and
+    # off by default.
+    echo "      proxy_http_version 2;"
+  else
+    if [ "$backend_http2" = "true" ]; then
+      echo "backend_http2 was asked for but this nginx cannot proxy over HTTP/2; using HTTP/1.1" >&2
+    fi
+    echo "      proxy_http_version 1.1;"
+    echo "      proxy_set_header Upgrade \$http_upgrade;"
+    echo "      proxy_set_header Connection \$connection_upgrade;"
+  fi
   cat <<'EOF'
-      proxy_http_version 1.1;
       proxy_set_header Host $host;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection $connection_upgrade;
       proxy_buffering off;
       # Fail fast on a backend that is down. The default here is 60 seconds,
       # and every request waiting on it holds a worker connection for that
@@ -170,9 +191,9 @@ sync_certs
 # same way proxy_pass does, so the resolver still applies and a backend that
 # restarts on a new address needs no reload.
 grpc_location() {
-  local target="$1" target_tls="$2" scheme="grpc"
+  local target="$1" target_tls="$2" path="${3:-/}" scheme="grpc"
   [ "$target_tls" = "true" ] && scheme="grpcs"
-  echo "    location / {"
+  echo "    location ${path} {"
   echo "      set \$upstream \"${target}\";"
   echo "      grpc_pass ${scheme}://\$upstream;"
   if [ "$target_tls" = "true" ]; then
@@ -192,15 +213,31 @@ grpc_location() {
 EOF
 }
 
-# Emits whichever location block the route's mode calls for.
+# Emits the location blocks a route calls for.
+#
+# A route is not necessarily all one protocol. A backend that fronts several
+# services - Traefik, or another proxy - commonly serves ordinary HTTP and gRPC
+# on the same host, told apart by path, because a gRPC method *is* a path:
+# /package.Service/Method. So gRPC can be asked for either for the whole route
+# (mode: grpc) or for named path prefixes on an otherwise ordinary one
+# (grpc_paths), and nginx picks per request: the longest matching prefix wins,
+# regardless of the order these are emitted in.
 route_location() {
-  local route="$1" target="$2" target_tls="$3" mode
+  local route="$1" target="$2" target_tls="$3" mode backend_http2 path
   mode=$(jq -r '.mode // "http"' <<<"$route")
+  backend_http2=$(jq -r '.backend_http2 // false' <<<"$route")
+
   if [ "$mode" = "grpc" ]; then
     grpc_location "$target" "$target_tls"
-  else
-    http_location "$target" "$target_tls"
+    return
   fi
+
+  while read -r path; do
+    [ -n "$path" ] || continue
+    grpc_location "$target" "$target_tls" "$path"
+  done < <(jq -r '.grpc_paths[]? // empty' <<<"$route")
+
+  http_location "$target" "$target_tls" "$backend_http2"
 }
 
 # The http module always owns the public HTTPS port. "tcp" routes (non-HTTP
