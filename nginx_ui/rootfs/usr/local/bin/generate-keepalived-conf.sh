@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OPTIONS=/data/options.json
-CONF=/etc/keepalived/keepalived.conf
+# Overridable only so the script can be exercised outside a container; the
+# add-on passes the same values it defaults to here.
+: "${OPTIONS:=/data/options.json}"
+: "${CONF:=/etc/keepalived/keepalived.conf}"
 
 IFACE=$(jq -r '.ha.interface' "$OPTIONS")
 VIP=$(jq -r '.ha.virtual_ip' "$OPTIONS")
@@ -22,9 +24,9 @@ if [ "$PRIORITY" -ge 150 ]; then
   STATE="MASTER"
 fi
 
-mkdir -p /etc/keepalived
+mkdir -p "$(dirname "$CONF")"
 cat > "$CONF" <<EOF
-vrrp_instance TLS_PROXY {
+vrrp_instance NGINX_UI {
     state ${STATE}
     interface ${IFACE}
     virtual_router_id ${VRID}

@@ -1,0 +1,14 @@
+#!/command/with-contenv sh
+# keepalived is optional, and a s6 longrun cannot simply not exist: a service
+# that exits is restarted, so when high availability is off this one idles
+# instead. init-addon removes the configuration file when the option is off,
+# which is what makes that decision here.
+if [ ! -f /etc/keepalived/keepalived.conf ]; then
+    echo "keepalived: high availability is off, staying idle"
+    exec sleep infinity
+fi
+
+# -n: stay in the foreground, s6 is the supervisor. -l: log to stderr, which is
+# the add-on log. --vrrp: only the VRRP child, this add-on does not use
+# keepalived's load balancer.
+exec keepalived -n -l -D --vrrp -f /etc/keepalived/keepalived.conf

@@ -221,7 +221,7 @@ cat <<'HINT'
                             forwarding works locally; something outside this
                             host is in the way, or the port was published to
                             127.0.0.1 on purpose (which is right for anything
-                            meant to sit behind TLS Proxy).
+                            meant to sit behind the Nginx UI add-on).
     v4 OK, v6 FAIL          look at the host address the port is published on,
                             in the second column. netavark writes rules for one
                             address family only when the port is bound to an
@@ -229,8 +229,8 @@ cat <<'HINT'
                             127.0.0.1 or 0.0.0.0 gets IPv4 rules and no IPv6
                             ones, deliberately, and its IPv6 dnat chain is left
                             empty. That is correct for anything meant to be
-                            reached only through TLS Proxy, which does its own
-                            IPv6.
+                            reached only through the Nginx UI add-on, whose
+                            nginx does its own IPv6.
                             To serve both, publish the port twice - once on
                             127.0.0.1 (or 0.0.0.0) and once on [::1] (or [::]).
                             A wildcard host address in a compose file, i.e. no

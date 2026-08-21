@@ -1,0 +1,75 @@
+name: "Nginx UI"
+version: "2.5.10"
+slug: "nginx_ui"
+description: "Nginx and its web control panel (nginx-ui): sites, streams, TLS certificates and logs, all configured from the panel rather than from add-on options."
+url: "https://github.com/domysh/ha-custom-addons"
+arch:
+  - amd64
+  - aarch64
+startup: services
+boot: auto
+# s6-overlay is the base image's entrypoint and expects to be PID 1: it is the
+# process supervisor that runs nginx, nginx-ui and - added here - keepalived,
+# and it reaps orphans itself. Docker's own init in front of it would only
+# duplicate that.
+init: false
+# nginx serves the LAN directly (80, 443 and whatever the panel adds), keepalived
+# needs to speak VRRP on a real interface, and the panel's ACME HTTP challenge
+# has to be reachable on port 80 from outside. All three want the host's network
+# stack rather than a bridge. It also means every port the panel opens must be
+# free on the host: nothing else may already hold 80/443.
+host_network: true
+privileged:
+  # keepalived assigns the virtual IP to an interface (NET_ADMIN) and sends
+  # VRRP advertisements from a raw socket (NET_RAW). Both are unused when
+  # `ha.enabled` is false.
+  - NET_ADMIN
+  - NET_RAW
+map:
+  # Read: the certificate the official Let's Encrypt add-on writes here can be
+  # named directly in a site's configuration, and in `certfile`/`keyfile` below.
+  # Write: certificates the panel issues itself can be stored here too, so Home
+  # Assistant Core can be pointed at the same files.
+  - type: ssl
+    read_only: false
+  # For static sites and anything else you want to serve from a path the rest
+  # of Home Assistant can also see.
+  - type: share
+    read_only: false
+# Informational under host networking - the Supervisor publishes nothing when
+# the add-on shares the host's stack - but it is what the "Open Web UI" button
+# resolves [PORT:9000] against, and it documents the default in the store.
+ports:
+  9000/tcp: 9000
+ports_description:
+  9000/tcp: "Nginx UI admin panel (change it with the admin_port option, not here)"
+# [PROTO:ssl] follows the `ssl` option below, so the button switches to https
+# when the panel is serving TLS. [PORT:9000] is the declared port above, not
+# `admin_port`: if you move the panel, browse to the new port directly.
+webui: "[PROTO:ssl]://[HOST]:[PORT:9000]"
+options:
+  admin_port: 9000
+  admin_host: "0.0.0.0"
+  ssl: false
+  certfile: "fullchain.pem"
+  keyfile: "privkey.pem"
+  ha:
+    enabled: false
+    interface: "eth0"
+    virtual_ip: ""
+    virtual_router_id: 51
+    priority: 100
+    auth_pass: "changeme"
+schema:
+  admin_port: port
+  admin_host: str
+  ssl: bool
+  certfile: str
+  keyfile: str
+  ha:
+    enabled: bool
+    interface: str
+    virtual_ip: str
+    virtual_router_id: int(1,255)
+    priority: int(1,254)
+    auth_pass: password

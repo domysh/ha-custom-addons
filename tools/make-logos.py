@@ -32,9 +32,8 @@ SUBTITLE   = (108, 117, 131)
 FEDORA     = (41, 101, 166)   # fedora blue
 FEDORA_DK  = (24, 62, 105)
 PODMAN     = (137, 45, 178)   # podman purple
-LOCK       = (34, 173, 122)   # tls green
-LOCK_DK    = (20, 122, 86)
-NGINX      = (0, 150, 57)
+NGINX      = (0, 150, 57)     # nginx green
+NGINX_DK   = (0, 105, 40)
 
 
 def canvas(w, h, bg=CLEAR):
@@ -80,113 +79,63 @@ def rounded(d, box, r, fill, outline=None, width=0):
 
 
 # --------------------------------------------------------------------------
-# TLS Proxy: a padlock whose shackle is the routing that goes through it.
+# Nginx UI: nginx's hexagon with a control panel inside it. An "N" was tried
+# first and dropped: away from nginx's own wordmark a bare letter reads as any
+# initial at all, while three sliders say what this add-on is - the panel you
+# configure nginx from - and they survive being scaled down to 48px, which is
+# the size that decides an icon.
 # --------------------------------------------------------------------------
-def tls_lock(d, cx, cy, s, body=LOCK, dark=LOCK_DK):
-    """Padlock centred on (cx, cy); s is the body width."""
-    bw, bh = s, s * 0.78
-    top = cy - bh * 0.15
-    # Shackle: a half circle whose two ends stop at the body's top edge, plus
-    # the straight bits down to it, so it reads as one piece and not as an arc
-    # floating above a box.
-    #
-    # The two have to be aligned by hand, because Pillow strokes them
-    # differently: `arc` grows its width *inwards* from the bounding box, so its
-    # centreline sits at radius - width/2, while `line` centres its width on the
-    # path. Using the same radius for both leaves a step of half the stroke
-    # width exactly where the curve meets the straight - which is what the top
-    # of the padlock looked wrong for.
-    sw = int(s * 0.14)
-    r = bw * 0.32                 # outer radius, i.e. the arc's bounding box
-    rc = r - sw / 2               # the radius the arc is actually drawn on
-    arc_cy = top - r * 0.6
-    d.arc([cx - r, arc_cy - r, cx + r, arc_cy + r], start=180, end=360,
-          fill=dark, width=sw)
-    for sx in (-rc, rc):
-        # From the arc's endpoint straight down into the body. The overlap into
-        # the body hides the butt end of the stroke.
-        d.line([(cx + sx, arc_cy), (cx + sx, top + sw * 0.4)],
-               fill=dark, width=sw)
-    # body
-    rounded(d, [cx - bw / 2, top, cx + bw / 2, top + bh], int(bw * 0.18), body)
-    # keyhole
-    kr = bw * 0.11
-    d.ellipse([cx - kr, top + bh * 0.28 - kr, cx + kr, top + bh * 0.28 + kr], fill=PAPER)
-    d.polygon([(cx - kr * 0.55, top + bh * 0.30), (cx + kr * 0.55, top + bh * 0.30),
-               (cx + kr * 0.30, top + bh * 0.66), (cx - kr * 0.30, top + bh * 0.66)],
-              fill=PAPER)
+def nui_hex(d, cx, cy, s, fill=NGINX):
+    """Pointy-top hexagon centred on (cx, cy); `s` is its width across the
+    flats, so the caller sizes it by the space it takes horizontally."""
+    R = s / math.sqrt(3)          # circumradius; height is 2R
+    pts = [(cx + R * math.sin(math.radians(a)),
+            cy - R * math.cos(math.radians(a))) for a in range(0, 360, 60)]
+    d.polygon(pts, fill=fill)
 
 
-def tls_routes(d, x, cy, spread, w, colour=NGINX, lw=None):
-    """One line in from the left, three out to the right, each ending in a dot:
-    the routing the proxy does. `spread` is the distance to the outer lines."""
-    lw = lw or max(2, int(spread * 0.16))
-    fork = x + w * 0.34
-    d.line([(x, cy), (fork, cy)], fill=colour, width=lw)
-    r = lw * 1.5
-    for dy in (-spread, 0.0, spread):
-        d.line([(fork, cy), (fork + w * 0.30, cy + dy), (x + w - r, cy + dy)],
-               fill=colour, width=lw, joint="curve")
-        d.ellipse([x + w - r * 2, cy + dy - r, x + w, cy + dy + r], fill=colour)
+def nui_sliders(d, cx, cy, w, colour=PAPER):
+    """Three tracks with a knob on each, centred on (cx, cy) and `w` wide.
+
+    The knobs are deliberately at three different positions: a column of them
+    would read as a bulleted list, and the point of the mark is that these are
+    controls being *set*."""
+    gap = w * 0.30
+    lw = max(2, int(w * 0.10))
+    r = lw * 1.45
+    for dy, kx in ((-gap, 0.66), (0.0, 0.32), (gap, 0.74)):
+        y = cy + dy
+        d.line([(cx - w / 2, y), (cx + w / 2, y)], fill=colour, width=lw)
+        kcx = cx - w / 2 + w * kx
+        d.ellipse([kcx - r, y - r, kcx + r, y + r], fill=colour)
 
 
-def tls_flow(d, x, cy, w, spread):
-    """The whole story in one mark, left to right: traffic arrives, passes
-    *through* the padlock, and fans out to three backends.
-
-    The earlier version set the padlock beside the fan, which made two marks
-    sharing a space rather than one mark - and left the lock off the path it is
-    supposed to be the gate for. Everything here is a fraction of the mark's
-    width `w`, so the three parts keep their spacing at any size: the padlock
-    has to stay clear of the entry dot on one side and of the fork on the
-    other, or it reads as touching them."""
-    lock_w = w * 0.30
-    lock_cx = x + w * 0.19
-    fork = x + w * 0.44
-    lw = max(2, int(w * 0.045))
-    r = lw * 1.6
-
-    # Inbound: just the line, entering from the edge. An entry dot was tried
-    # and dropped - at this size the padlock covers it, and the asymmetry of
-    # "plain line in, three dots out" already gives the mark its direction.
-    d.line([(x, cy), (fork, cy)], fill=NGINX, width=lw)
-
-    # Outbound: three domains, each ending in its own dot.
-    for dy in (-spread, 0.0, spread):
-        d.line([(fork, cy), (fork + (x + w - fork) * 0.42, cy + dy),
-                (x + w - r, cy + dy)],
-               fill=NGINX, width=lw, joint="curve")
-        d.ellipse([x + w - r * 2, cy + dy - r, x + w, cy + dy + r], fill=NGINX)
-
-    # The lock last, so it sits on the line rather than beside it.
-    tls_lock(d, lock_cx, cy - lock_w * 0.06, lock_w)
+def nui_mark(d, cx, cy, s):
+    """The hexagon with the sliders in it, as one mark."""
+    nui_hex(d, cx, cy, s)
+    # 0.56 of the width, so the tracks stop well inside the sloping sides -
+    # at the top and bottom rows the hexagon is narrower than across its middle.
+    nui_sliders(d, cx, cy, s * 0.56)
 
 
-def tls_icon(path, size=128):
+def nui_icon(path, size=128):
     im, d = canvas(size, size)
     S = size * SS
-    # The padlock alone. Two attempts at putting the logo's routing fan under
-    # it were dropped after checking the icon at the sizes it is actually
-    # rendered: at 48px and below the three branches and their dots merge into
-    # a smudge, and they took contrast away from the one shape that still reads
-    # there. The routing is the logo's job, where there is room for it.
-    # No tile behind it either - the theme provides the background.
-    tls_lock(d, S * 0.5, S * 0.46, S * 0.62)
+    nui_mark(d, S * 0.5, S * 0.5, S * 0.80)
     finish(im, size, size, path)
 
 
-def tls_logo(path, w=560, h=160):
+def nui_logo(path, w=560, h=160):
     im, d = canvas(w, h)
     W, H = w * SS, h * SS
-    tls_flow(d, W * 0.035, H * 0.50, W * 0.32, H * 0.25)
-    x = W * 0.40
+    nui_mark(d, W * 0.115, H * 0.5, H * 0.70)
+    x = W * 0.225
     avail = W - x - W * 0.035
-    f1 = fit(d, "TLS Proxy", int(H * 0.34), avail)
-    f2 = fit(d, "nginx  ·  TLS termination, routing by domain",
-             int(H * 0.15), avail, bold=False)
-    d.text((x, H * 0.40), "TLS Proxy", font=f1, fill=LOCK_DK, anchor="lm")
-    d.text((x, H * 0.68), "nginx  ·  TLS termination, routing by domain",
-           font=f2, fill=SUBTITLE, anchor="lm")
+    sub = "nginx  \u00b7  sites, certificates and logs from a web panel"
+    f1 = fit(d, "Nginx UI", int(H * 0.34), avail)
+    f2 = fit(d, sub, int(H * 0.15), avail, bold=False)
+    d.text((x, H * 0.40), "Nginx UI", font=f1, fill=NGINX_DK, anchor="lm")
+    d.text((x, H * 0.68), sub, font=f2, fill=SUBTITLE, anchor="lm")
     finish(im, w, h, path)
 
 
@@ -248,7 +197,7 @@ def fp_logo(path, w=500, h=160):
 
 
 if __name__ == "__main__":
-    tls_icon("tls_proxy/icon.png")
-    tls_logo("tls_proxy/logo.png")
+    nui_icon("nginx_ui/icon.png")
+    nui_logo("nginx_ui/logo.png")
     fp_icon("fedora_podman/icon.png")
     fp_logo("fedora_podman/logo.png")
