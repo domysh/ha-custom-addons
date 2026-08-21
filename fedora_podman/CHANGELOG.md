@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.1
+
+- Stop handing over to a real `systemctl` when one is on disk. Packages that
+  ship a unit file commonly pull the systemd package in for their scriptlets,
+  so a real binary is easy to end up with — and it cannot work here, since
+  nothing in this add-on can be PID 1. Deferring to it replaced a working
+  service manager with one that only ever prints "System has not been booted
+  with systemd". The replacement now answers regardless; the real binary is
+  still reachable by its own path.
+- Answer `systemctl --version`. Installers parse it: `kardianos/service`, which
+  netbird and others use to install themselves, matches `systemd ([0-9]+)` to
+  decide which unit-file features it may use, and assumes the worst without a
+  parseable answer. The number is a compatibility claim and the line says so.
+- Say once at start-up, when the systemd package is present, that `systemctl`
+  resolves to the replacement — otherwise it is a confusing thing to run into.
+
 ## 1.1.0
 
 - **Services now come from their own systemd unit files.** `dnf install` a

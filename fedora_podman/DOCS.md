@@ -463,9 +463,17 @@ another client of the same VPN running elsewhere on the host.
 ### If a unit has no unit file
 
 Some programs install their service by writing one — `netbird service install`
-is an example, and it calls `systemctl daemon-reload` afterwards. That works:
-`daemon-reload` is accepted and does nothing, because nothing is cached, and
-returns success so the installer does not stop there.
+is an example. That works: such installers detect systemd by looking for a
+`systemctl` and at `/proc/1/comm`, ask `systemctl --version` to decide which
+unit-file features they may use, then write the unit and run `enable` and
+`daemon-reload`. All four are answered here, `daemon-reload` doing nothing
+because nothing is cached.
+
+Note that installing such a package often pulls the systemd package itself in,
+for its scriptlets. That is harmless: `systemctl` still resolves to the
+replacement, because `/usr/local/bin` comes first in `PATH` and the replacement
+does not hand over to the real binary — which could only refuse, having no
+systemd to talk to.
 
 For a program that ships no unit at all, writing one is the same work as
 writing any other service file, and it belongs in `/etc/systemd/system`:

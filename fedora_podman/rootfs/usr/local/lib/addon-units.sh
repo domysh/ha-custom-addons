@@ -374,6 +374,17 @@ unit_start_enabled() {
     local link name file started=()
 
     mkdir -p "${UNIT_RUN_DIR}" "${UNIT_LOG_DIR}"
+
+    # Worth saying once, because it is confusing to run into: installing a
+    # package that ships a unit file often pulls the systemd package in for its
+    # scriptlets, so a real systemctl can appear on disk. It cannot run here -
+    # nothing can be PID 1 - and /usr/local/bin comes first in PATH, so the
+    # replacement is what answers. Anyone who calls the real one by its full
+    # path gets systemd's own refusal, which is not a fault in this add-on.
+    if [ -x /usr/bin/systemctl ]; then
+        log "The systemd package is installed, but systemd cannot run in an add-on."
+        log "'systemctl' resolves to the replacement in /usr/local/bin, which runs units."
+    fi
     [ -d "${UNIT_WANTS_DIR}" ] || return 0
 
     for link in "${UNIT_WANTS_DIR}"/*; do

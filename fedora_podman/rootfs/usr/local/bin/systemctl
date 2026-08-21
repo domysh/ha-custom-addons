@@ -11,15 +11,14 @@
 # See /usr/local/lib/addon-units.sh for exactly which unit directives are
 # honoured and which are ignored.
 #
-# If a real systemctl ever appears - someone installs systemd itself - defer to
-# it rather than standing in its way.
+# Note what this deliberately does NOT do: hand over to /usr/bin/systemctl when
+# the systemd package happens to be installed. Packages that ship a unit file
+# commonly pull systemd in for their scriptlets, so it is easy to end up with a
+# real systemctl on disk - and it cannot work here for the reason above, so
+# deferring to it would replace a working service manager with one that only
+# ever prints "System has not been booted with systemd". The real binary is
+# still there for anyone who wants it, at its own path.
 set -uo pipefail
-
-for real in /usr/bin/systemctl /bin/systemctl; do
-    if [ -x "${real}" ] && [ "${real}" != "$0" ]; then
-        exec "${real}" "$@"
-    fi
-done
 
 # shellcheck source=../lib/addon-units.sh
 source /usr/local/lib/addon-units.sh
@@ -275,6 +274,15 @@ main() {
             load_unit_or_die "${1:-}"
             printf '# %s\n' "${UNIT_FILE}"
             cat "${UNIT_FILE}"
+            ;;
+        --version | version)
+            # Installers parse this. kardianos/service - which netbird and
+            # others use to install themselves - runs `systemctl --version` and
+            # matches /systemd ([0-9]+)/ to decide which unit-file features it
+            # may use; without a parseable answer it assumes the worst.
+            # The number is a compatibility claim, not a fact, so the line says
+            # what this actually is right after it.
+            echo "systemd 245 (addon-units: a replacement, not systemd)"
             ;;
         daemon-reload | daemon-reexec | preset)
             # Nothing is cached, so there is nothing to reload. Reported as
