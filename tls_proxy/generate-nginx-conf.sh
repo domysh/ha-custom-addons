@@ -332,9 +332,21 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
     DOMAIN=$(jq -r '.domain' <<<"$route")
     TARGET=$(jq -r '.target' <<<"$route")
     TARGET_TLS=$(jq -r '.target_tls // false' <<<"$route")
+    WEBSOCKETS=$(jq -r '.websockets // false' <<<"$route")
     echo "  server {"
     http_listen "$HTTPS_LISTEN_SPEC"
-    quic_listen
+    # A WebSocket handshake cannot survive HTTP/2 or HTTP/3: nginx rejects any
+    # HTTP/2 request carrying an Upgrade header outright ("client sent
+    # \"Upgrade\" header", 400 Bad Request) and implements no Extended CONNECT
+    # (RFC 8441) to replace it. Browsers avoid the problem by using HTTP/1.1 for
+    # WebSockets whatever else is on offer, but a client with a shared HTTP/2
+    # transport - most Go and Rust ones - does not, and fails with a 400 that
+    # says nothing about why.
+    if [ "$WEBSOCKETS" = "true" ]; then
+      echo "    http2 off;"
+    else
+      quic_listen
+    fi
     echo "    server_name ${DOMAIN};"
     echo "    ssl_certificate $(route_cert "$route" cert);"
     echo "    ssl_certificate_key $(route_cert "$route" key);"
@@ -352,8 +364,11 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
     DOMAIN=$(jq -r '.domain' <<<"$route")
     TARGET=$(jq -r '.target' <<<"$route")
     TARGET_TLS=$(jq -r '.target_tls // false' <<<"$route")
+    WEBSOCKETS=$(jq -r '.websockets // false' <<<"$route")
     echo "  server {"
     http_listen "$HTTP_PORT"
+    # h2c on the cleartext port has the same problem as h2 on the TLS one.
+    [ "$WEBSOCKETS" = "true" ] && echo "    http2 off;"
     echo "    server_name ${DOMAIN};"
     route_location "$route" "$TARGET" "$TARGET_TLS"
     echo "  }"

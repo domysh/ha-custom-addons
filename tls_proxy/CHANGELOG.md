@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.1
+
+- New per-route `websockets`, which keeps that route on HTTP/1.1. Enabling
+  HTTP/2 in 1.1.0 broke WebSocket clients that negotiate it: a WebSocket
+  handshake is an HTTP `Upgrade`, nginx rejects any HTTP/2 request carrying one
+  with `400 Bad Request`, and it implements no Extended CONNECT (RFC 8441) to
+  replace it. Browsers were unaffected — they use HTTP/1.1 for WebSockets
+  regardless — which is what made this look like a backend problem rather than
+  a proxy one. Marking the route disables HTTP/2 and HTTP/3 for it alone,
+  including on the cleartext port, where `http2 on` would otherwise offer h2c.
+
 ## 1.2.0
 
 - New per-route `grpc_paths`: path prefixes on an otherwise ordinary route that

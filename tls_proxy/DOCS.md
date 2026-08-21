@@ -97,6 +97,28 @@ and never attempt QUIC. Two things are worth knowing:
 
 Both can be turned off with `enable_http2` and `enable_http3`.
 
+**WebSockets need HTTP/1.1, and this is the one place the defaults can bite.**
+A WebSocket handshake is an HTTP `Upgrade`, which HTTP/2 has no equivalent for:
+nginx rejects any HTTP/2 request carrying an `Upgrade` header with `400 Bad
+Request`, logging `client sent "Upgrade" header`, and it implements no Extended
+CONNECT (RFC 8441) to take its place. Browsers sidestep this by always using
+HTTP/1.1 for WebSockets, so a web UI keeps working — but a client with a shared
+HTTP/2 transport, which most Go and Rust clients have, will negotiate HTTP/2 by
+ALPN and then fail its handshake with a 400 that explains nothing.
+
+Mark such a route and it keeps HTTP/1.1 to itself, HTTP/2 and HTTP/3 staying on
+everywhere else:
+
+```yaml
+  - domain: "vpn.example.com"
+    target: "127.0.0.1:4001"
+    websockets: true
+```
+
+The signs to look for: a `400` in the access log for the handshake request, or
+`client sent "Upgrade" header` in the error log. `curl --http1.1` succeeding
+where the default fails is the same evidence from the other side.
+
 **gRPC** needs `mode: "grpc"` on the route:
 
 ```yaml
@@ -271,6 +293,7 @@ host.
 | `routes[].cert_file` / `key_file` | str | *(global)* | Per-route certificate override. |
 | `routes[].grpc_paths` | list of str | *(empty)* | Path prefixes on this route proxied as gRPC, for a backend serving both. |
 | `routes[].backend_http2` | bool | `false` | Speak HTTP/2 to the backend rather than HTTP/1.1. Not for websocket routes. |
+| `routes[].websockets` | bool | `false` | This route carries WebSockets: serve it over HTTP/1.1 only, since an `Upgrade` cannot cross HTTP/2 or HTTP/3. |
 | `routes[].enable_http` | bool | `false` | Also serve this route in the clear on `http_port`. |
 | `routes[].target_tls` | bool | `false` | Connect to the backend over HTTPS. |
 | `ha.*` | | | keepalived, see above. |
