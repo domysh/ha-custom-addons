@@ -19,8 +19,8 @@ source /usr/local/bin/configure-ssh.sh
 source /usr/local/bin/configure-podman.sh
 # shellcheck source=./configure-persistence.sh
 source /usr/local/bin/configure-persistence.sh
-# shellcheck source=./configure-services.sh
-source /usr/local/bin/configure-services.sh
+# shellcheck source=../lib/addon-units.sh
+source /usr/local/lib/addon-units.sh
 # shellcheck source=./inspect-runtime.sh
 source /usr/local/bin/inspect-runtime.sh
 
@@ -344,9 +344,9 @@ write_motd() {
                           does not answer or 'podman logs' stays empty
    addon-reset --help     wipe the podman storage, the persistent system
                           layer or the host keys, at the next start
-   addon-service list     background daemons (there is no systemd here:
-                          'addon-service examples' has a ready-made
-                          tailscaled to start from)
+   systemctl              services from their own unit files: enable,
+                          start, status, logs - a stand-in for systemd,
+                          which cannot run here (see DOCS.md)
 
    Anything outside the persistent paths above is lost when this add-on is
    updated, rebuilt or removed.
@@ -509,10 +509,10 @@ main() {
     # that exists while the containers above are still coming up.
     { sleep 60; track_running_containers; } &
 
-    # Same reasoning as start_containers: a service that fails or hangs must not
-    # cost you the shell you need to fix it. Each service gets its own
-    # supervising background process.
-    start_services
+    # Same reasoning as start_containers: a unit that fails or hangs must not
+    # cost you the shell you need to fix it. Each one gets its own supervising
+    # background process.
+    unit_start_enabled
 
     log "SSH is listening on port ${SSH_PORT} (public-key authentication only)"
     # exec: sshd becomes the process the Supervisor watches, so stopping the

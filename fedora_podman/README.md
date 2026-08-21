@@ -27,9 +27,9 @@ appear in the store at all).
   updates and resets only when you delete its directory.
 - Containers that were running when the add-on stopped come back when it
   starts, whatever restart policy they carry.
-- Background daemons without systemd: an executable file in `/config/services`
-  is started at boot and restarted if it exits, with ready-made examples to
-  start from.
+- Services from their own systemd unit files, without systemd: `dnf install`
+  a package, `systemctl enable --now` it, and it runs and comes back after a
+  restart.
 
 ## Quick start
 
@@ -68,9 +68,8 @@ rootfs/
   usr/local/bin/inspect-runtime.sh     what the Supervisor actually granted
   usr/local/bin/podman-diag            read-only state dump for debugging
   usr/local/bin/addon-reset            queue a reset of storage / system layer
-  usr/local/bin/configure-services.sh  supervisor for /config/services
-  usr/local/bin/addon-service          manage those services (no systemd here)
-  usr/local/share/addon-services/      ready-made example services
+  usr/local/lib/addon-units.sh         reads and runs systemd unit files
+  usr/local/bin/systemctl              the systemd replacement built on it
 DOCS.md         user-facing documentation (shown in the add-on UI)
 CHANGELOG.md    version history
 ```

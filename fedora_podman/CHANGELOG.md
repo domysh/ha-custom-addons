@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.1.0
+
+- **Services now come from their own systemd unit files.** `dnf install` a
+  package, `systemctl enable --now` it, and it runs — and starts again when the
+  add-on does. The previous mechanism asked for an executable file per service
+  in `/config/services`, which meant translating by hand what the package had
+  already shipped, and it is removed together with `addon-service` and its
+  example services.
+  There is still no systemd, and there cannot be: it refuses to start unless it
+  is PID 1, and this add-on shares the host's PID namespace so that `/host` and
+  `nsenter` work, which makes PID 1 the host's own systemd. `systemctl` is
+  therefore a replacement that reads the same unit files from the same
+  directories and runs them.
+  Honoured: `Type=simple`/`exec`/`notify`/`idle`/`oneshot`/`forking`, the
+  `Exec*` lines, `Environment=`, `EnvironmentFile=`, `WorkingDirectory=`,
+  `User=`, `Restart=` with `RestartSec=`, `TimeoutStopSec=`, `WantedBy=`, line
+  continuations and template units. Ignored rather than half-applied: socket
+  and timer activation, the notify protocol, dependency ordering, and the
+  sandboxing directives — in here the add-on is the sandbox.
+  `enable` links into `multi-user.target.wants` as systemd does, which is on
+  the persistent layer, so it survives updates. `daemon-reload` is accepted and
+  does nothing, so installers that write a unit and call it — `netbird service
+  install` among them — complete.
+- Each service runs in a process group of its own and is stopped as a group,
+  which is the closest thing here to systemd stopping a cgroup: a daemon that
+  forked helpers does not leave them running.
+- Logs are per unit in `/var/log/addon-units/`, rotated at 5 MB, and units
+  started at boot also reach the Home Assistant add-on log.
+
 ## 1.0.3
 
 - Drop netavark's leftover firewall rules at start-up. netavark removes a

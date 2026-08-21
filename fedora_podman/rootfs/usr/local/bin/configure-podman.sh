@@ -664,6 +664,31 @@ cleanup_stale_netavark_rules() {
     fi
 }
 
+# /dev/net/tun does not exist in an add-on container: Docker populates /dev with
+# a small fixed set of nodes and that is not in it. Every VPN daemon needs it -
+# netbird, tailscaled, wireguard-go, openvpn - and a VPN client without it does
+# not necessarily fail: some drop to a userspace mode that routes nothing but
+# their own proxy, which looks like a working connection until nothing on the
+# far side can be reached. The
+# device cgroup already allows it (full_access), so only the node is missing,
+# and its major:minor is fixed by the kernel's device list.
+ensure_tun_device() {
+    [ -c /dev/net/tun ] && return 0
+
+    modprobe tun 2>/dev/null || true
+    mkdir -p /dev/net
+    if mknod /dev/net/tun c 10 200 2>/dev/null; then
+        chmod 0600 /dev/net/tun
+        log "Created /dev/net/tun, which VPN daemons need for a tunnel interface."
+        return 0
+    fi
+
+    warn "/dev/net/tun is missing and could not be created."
+    warn "VPN daemons will not get a tunnel interface, and some will fall back to a"
+    warn "userspace mode that proxies only their own port. This needs"
+    warn "Protection mode OFF, and the 'tun' module available on the host."
+}
+
 warn_on_low_space() {
     local graphroot="$1"
     local avail_mb

@@ -1,5 +1,5 @@
 name: "Fedora Podman Shell"
-version: "1.0.3"
+version: "1.1.0"
 slug: "fedora_podman"
 description: "Fedora shell environment with Podman, reachable over SSH, for running your own containers next to (but isolated from) the Supervisor's Docker engine."
 url: "https://github.com/domysh/ha-custom-addons"

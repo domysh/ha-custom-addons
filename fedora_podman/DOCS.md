@@ -381,98 +381,111 @@ had installed are not carried over: reinstall them, then delete the retired
 directory. It is left on disk on purpose, so you can look at what was in it
 first.
 
-## Running your own daemons (there is no systemd)
+## Services: systemd units without systemd
 
-`systemctl start whatever` cannot work here, and no configuration will make it:
-this add-on is a Supervisor-managed container whose lifecycle Home Assistant
-owns, PID 1 is a minimal init rather than systemd, and the unit files packages
-install are inert. Running `systemctl` prints that, and points here.
-
-What replaces it is one file per daemon:
+Packages ship systemd unit files, and this add-on runs them:
 
 ```sh
-addon-service examples             # ready-made ones, tailscaled included
-addon-service install tailscaled   # copies it to /config/services/tailscaled
-addon-service list                 # what exists, and what is running
-addon-service start tailscaled
-addon-service logs tailscaled -f
-addon-service stop tailscaled
-addon-service status               # everything, with the last log lines
+dnf install -y netbird
+systemctl enable --now netbird
+systemctl status netbird
 ```
 
-A service is **an executable file in `/config/services` that runs in the
-foreground**. The add-on starts each one when it starts and restarts it when it
-exits, backing off up to a minute so a misconfigured daemon cannot spin. That
-is the same contract as systemd's `Type=simple`, which is why porting a unit
-file is usually copying its `ExecStart` line into a two-line script:
+There is no systemd behind that, and there cannot be. systemd refuses to start
+unless it is PID 1 — `src/core/main.c` checks `getpid_cached() == 1` — and this
+add-on shares the host's PID namespace so that `/host` and `nsenter` work, which
+makes PID 1 in here Home Assistant OS's own systemd. Nothing of ours can take
+that place. The choice is between a host filesystem and a real init, and this
+add-on exists for the former.
+
+So `systemctl` is a replacement that reads the same unit files, from the same
+places — `/etc/systemd/system`, `/usr/local/lib/systemd/system`,
+`/usr/lib/systemd/system` — and runs them:
 
 ```sh
-printf '%s\n' '#!/usr/bin/env bash' \
-    'exec /usr/sbin/mosquitto -c /config/mosquitto.conf' \
-    > /config/services/mosquitto
-chmod +x /config/services/mosquitto
-addon-service start mosquitto
+systemctl start | stop | restart | reload UNIT
+systemctl enable | disable [--now] UNIT
+systemctl status [UNIT]          # state, main PID, and the tail of its log
+systemctl is-active | is-enabled UNIT
+systemctl list-units             # everything found, and what it is doing
+systemctl cat UNIT               # the file, and where it came from
 ```
 
-Two rules for the script: it must **stay in the foreground** (no `-d`, no
-`--daemon`, no forking — the supervisor would see it exit and restart it for
-ever), and it should `exec` the daemon so signals reach it directly.
+`enable` links the unit into `multi-user.target.wants`, exactly as systemd
+does. That directory is on `/etc`, which is on the add-on's persistent layer,
+so what you enable once is started again every time the add-on starts.
 
-`/config` is a mapped host path, so services survive add-on updates. Their
-output goes to `/config/services/logs/<name>.log`, rotated at 5 MB, and — for
-the services the add-on started itself — to the Home Assistant add-on log as
-well, tagged with the service name. A service started by hand with
-`addon-service start` writes only to its file, since it has no way to reach the
-add-on's stdout.
+Logs are per unit under `/var/log/addon-units/`, rotated at 5 MB, and units the
+add-on started at boot also log to the Home Assistant add-on log, tagged with
+the unit name. `systemctl status` shows the last dozen lines.
 
-To keep a service without running it, rename it to `<name>.disabled`.
-`addon-service stop` stops it only until the next add-on start.
+### What is honoured, and what is not
 
-### Example: a daemon that needs a tunnel device
+Supported: `Type=simple`, `exec`, `notify`, `idle`, `oneshot` and `forking`;
+`ExecStart`, `ExecStartPre`, `ExecStartPost`, `ExecStop`, `ExecReload`;
+`Environment=` and `EnvironmentFile=` (including the leading `-` for "skip if
+missing"); `WorkingDirectory=`; `User=`; `Restart=` with `RestartSec=`;
+`TimeoutStopSec=`; `WantedBy=`; line continuations; and template units
+(`foo@bar.service`) with the `%i`, `%I`, `%n` and `%N` specifiers.
 
-Tailscale's client is a good worked example, because it exercises both of the
-things that make a VPN daemon awkward in a container — a tunnel device and the
-host's network namespace:
+Not supported, and ignored rather than half-applied: socket, timer and path
+activation; the `Type=notify` readiness protocol (such a unit is run as
+`simple`); dependency ordering beyond "everything enabled starts at boot";
+resource limits; and the sandboxing directives — `PrivateTmp`,
+`ProtectSystem`, `NoNewPrivileges` and the rest — because in here the add-on
+*is* the sandbox, and pretending otherwise would be worse than not pretending.
 
-```sh
-dnf install -y tailscale            # persistent, so this is a one-time step
-addon-service install tailscaled
-addon-service start tailscaled
-tailscale up                       # once: prints a login URL
-tailscale status
+Two differences worth knowing. `Restart=` is applied with a backoff that grows
+to a minute, so a misconfigured service cannot spin; a unit that ran for over a
+minute gets its short delay back. And stopping a unit signals its whole process
+group, which is the closest thing here to systemd stopping a cgroup: a daemon
+that forked helpers does not leave them behind.
+
+### VPN clients and `/dev/net/tun`
+
+A VPN client — netbird, tailscale, wireguard-go, openvpn — needs
+`/dev/net/tun`, and a container does not have it: Docker populates `/dev` with
+a small fixed set of nodes and that is not among them. The add-on creates it at
+start-up, which the device cgroup already permits thanks to `full_access`.
+
+This is worth knowing because the failure is quiet: some clients do not stop
+when the device is missing, they fall back to a userspace mode that proxies
+only their own port, and the connection looks established while nothing on the
+far side is reachable. If the node could not be created the add-on says so in
+its log, which is the first place to look when a VPN client connects but
+carries no traffic.
+
+Note also that this add-on uses the host's network namespace, so a VPN
+interface it brings up belongs to Home Assistant OS itself, not just to this
+container: the whole machine joins that network, and it will collide with
+another client of the same VPN running elsewhere on the host.
+
+### If a unit has no unit file
+
+Some programs install their service by writing one — `netbird service install`
+is an example, and it calls `systemctl daemon-reload` afterwards. That works:
+`daemon-reload` is accepted and does nothing, because nothing is cached, and
+returns success so the installer does not stop there.
+
+For a program that ships no unit at all, writing one is the same work as
+writing any other service file, and it belongs in `/etc/systemd/system`:
+
+```ini
+[Unit]
+Description=My daemon
+
+[Service]
+ExecStart=/usr/local/bin/mydaemon --foreground
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-If your Fedora release does not carry the package, add Tailscale's own
-repository first:
-
-```sh
-dnf config-manager addrepo --from-repofile=https://pkgs.tailscale.com/stable/fedora/tailscale.repo
-```
-
-Do not enable the systemd unit the package ships — that is what the service file
-replaces.
-
-**Read this before starting it: the add-on runs in the host's network
-namespace, so `tailscale0` is created on Home Assistant OS itself.** The whole
-machine joins your tailnet, not just this container, for as long as the service
-runs. That is normally the point — it is how you reach Home Assistant from
-outside — but it has consequences:
-
-- It collides with any other tailscale on this host, including the official
-  Tailscale add-on. Run one or the other.
-- `tailscale up --advertise-routes=...` advertises the *host's* networks, and
-  `--advertise-exit-node` makes the host an exit node.
-- The node's identity lives in `/config/tailscale`, on a mapped path, so
-  updating the add-on does not create a new machine in your tailnet each time.
-
-One thing the add-on has to do for any VPN daemon: **create `/dev/net/tun`.**
-Docker populates a container's `/dev` with a small fixed set of nodes and that
-is not among them, and without it tailscaled does not fail — it silently falls
-back to userspace networking, where it proxies its own SOCKS port and nothing
-on the tailnet can reach this machine. The node is created at start-up (the
-device cgroup already allows it, thanks to `full_access`); if it could not be,
-the log says so and the tailscaled service repeats the warning rather than
-pretending to be connected.
+The one rule that matters: **the command must stay in the foreground.** A unit
+whose `ExecStart` daemonises (`Type=forking` without a `PIDFile=`) leaves
+nothing to supervise, and the service is restarted for ever as though it kept
+exiting.
 
 ## Resetting the add-on
 

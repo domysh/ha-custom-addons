@@ -39,7 +39,8 @@ FROM ${BUILD_FROM}
 #       come up with a broken UTF-8 setup.
 #   util-linux-core
 #       provides nsenter, used to get a real shell in the host's namespaces
-#       (see the host access section of DOCS.md).
+#       (see the host access section of DOCS.md), and setpriv, which runs a
+#       unit's ExecStart as its User= when it asks for one.
 #
 # Package versions are intentionally not pinned: Fedora only ships one version
 # of each of these per release, and pinning them would make the image
@@ -110,23 +111,22 @@ RUN set -eux; \
 COPY rootfs /
 
 # The entrypoint and the user-facing commands are executed; the configure-*.sh
-# files are sourced by them. The systemctl here is not systemd: it is a stub
-# that explains why systemctl cannot work and points at addon-service (see the
-# file). /usr/local/bin precedes /usr/bin in PATH, and it defers to a real
-# systemctl if one is ever installed.
+# files and the unit library are sourced by them. The systemctl here is not
+# systemd - which cannot run in this add-on at all, see addon-units.sh - but a
+# replacement that reads the unit files packages install. /usr/local/bin
+# precedes /usr/bin in PATH, and it defers to a real systemctl if one is ever
+# installed.
 RUN chmod 0755 \
         /usr/local/bin/entrypoint.sh \
         /usr/local/bin/podman-diag \
         /usr/local/bin/addon-reset \
-        /usr/local/bin/addon-service \
         /usr/local/bin/systemctl \
-    && chmod 0755 /usr/local/share/addon-services/* \
     && chmod 0644 \
         /usr/local/bin/configure-podman.sh \
         /usr/local/bin/configure-ssh.sh \
         /usr/local/bin/configure-persistence.sh \
-        /usr/local/bin/configure-services.sh \
-        /usr/local/bin/inspect-runtime.sh
+        /usr/local/bin/inspect-runtime.sh \
+        /usr/local/lib/addon-units.sh
 
 LABEL io.hass.type="addon"
 
