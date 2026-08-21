@@ -7,6 +7,8 @@ keepalived and a virtual IP.
 
 - Routes by **HTTP `Host`**, so it also works behind another proxy that connects
   by IP address without SNI.
+- HTTP/1.1, HTTP/2 and HTTP/3 (QUIC), and `mode: grpc` routes that keep
+  HTTP/2 end to end for gRPC backends.
 - Per-route certificate, plain-HTTP and TLS-to-backend settings.
 - Dedicated-port passthrough (`mode: tcp`) for protocols that are not HTTP.
 - IPv4 and IPv6, and an hourly check that reloads nginx after a renewal.

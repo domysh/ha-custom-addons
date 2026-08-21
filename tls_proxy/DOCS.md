@@ -79,6 +79,43 @@ need a `tcp` route at all — it is reachable directly. These are for the case
 where the public port and the backend's port differ, or where the backend is
 only reachable internally.
 
+### Protocol versions, and gRPC
+
+HTTP/2 is on by default on every HTTPS route, negotiated over ALPN — a client
+that does not speak it gets HTTP/1.1, so there is nothing to opt into.
+
+**HTTP/3 (QUIC)** is on by default too, on UDP on the same port number as
+HTTPS. Each route advertises it with an `Alt-Svc` header, which is how a
+browser learns to try it; without that header clients stay on HTTP/2 over TCP
+and never attempt QUIC. Two things are worth knowing:
+
+- It needs UDP `listen_port` open on your router and firewall, not just TCP.
+  Where it is blocked, clients fall back to HTTP/2 silently.
+- It needs an nginx built with QUIC. The add-on asks the binary at start-up
+  (`nginx -V`) rather than assuming, and says so in the log if the support is
+  missing, serving HTTP/1.1 and HTTP/2 instead of refusing to start.
+
+Both can be turned off with `enable_http2` and `enable_http3`.
+
+**gRPC** needs `mode: "grpc"` on the route:
+
+```yaml
+  - domain: "api.example.com"
+    target: "127.0.0.1:9000"
+    mode: "grpc"
+    target_tls: false     # true if the backend serves gRPC over TLS
+```
+
+This is not a detail of tidiness: gRPC is HTTP/2 from end to end and carries
+its status code in trailers, and an ordinary `http` route talks HTTP/1.1 to the
+backend, which drops them. The result is calls that appear to connect and then
+fail in ways that look like the application's fault. A `grpc` route proxies
+with nginx's gRPC module instead, keeps HTTP/2 all the way through, and holds
+connections open long enough for streaming RPCs to idle between messages.
+
+The backend address may be a name, as for any other route: it is resolved at
+request time, so a backend that restarts on a new address needs no reload.
+
 ### Certificates per route
 
 `cert_file` and `key_file` at the top level (default `fullchain.pem` and
@@ -187,12 +224,14 @@ host.
 | `listen_port` | port | `443` | HTTPS port for all `http` routes. |
 | `http_port` | port | `80` | Plain HTTP port, used by routes with `enable_http`. |
 | `enable_ipv6` | bool | `true` | Also listen on `[::]`. Turn off on hosts without IPv6. |
+| `enable_http2` | bool | `true` | HTTP/2 on the HTTPS port. Required for gRPC. |
+| `enable_http3` | bool | `true` | HTTP/3 (QUIC) on UDP `listen_port`, advertised with `Alt-Svc`. Ignored if this nginx has no QUIC support. |
 | `cert_file` | str | `fullchain.pem` | Certificate in `/ssl` served to clients. |
 | `key_file` | str | `privkey.pem` | Its private key. |
 | `default_target` | str | *(empty)* | Where unmatched Hosts go; empty means `444`. |
 | `routes[].domain` | str | — | The name the client asks for (a label only, for `tcp`). |
 | `routes[].target` | str | — | `host:port` of the backend. |
-| `routes[].mode` | `http`/`tcp` | `http` | Terminate TLS and route by Host, or pass a dedicated port through. |
+| `routes[].mode` | `http`/`tcp`/`grpc` | `http` | Terminate TLS and route by Host, pass a dedicated port through, or proxy gRPC end to end over HTTP/2. |
 | `routes[].tcp_port` | port | — | Required for `tcp`: the public port for this service. |
 | `routes[].cert_file` / `key_file` | str | *(global)* | Per-route certificate override. |
 | `routes[].enable_http` | bool | `false` | Also serve this route in the clear on `http_port`. |

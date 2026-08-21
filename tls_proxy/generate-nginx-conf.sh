@@ -19,6 +19,21 @@ DEFAULT_CERT="${CERT_DIR}/${DEFAULT_CERT_FILE}"
 DEFAULT_KEY="${CERT_DIR}/${DEFAULT_KEY_FILE}"
 
 HAS_TCP_ROUTES=$(jq -r '[.routes[] | select(.mode == "tcp")] | length' "$OPTIONS")
+ENABLE_HTTP2=$(jq -r '.enable_http2 // true' "$OPTIONS")
+ENABLE_HTTP3=$(jq -r '.enable_http3 // true' "$OPTIONS")
+
+# HTTP/3 needs an nginx built with QUIC, which is not something to assume: a
+# "listen ... quic" in a binary without the module is a start-up failure, and
+# this add-on is the thing everything else is published through. Ask the binary
+# instead.
+USE_HTTP3=false
+if [ "$ENABLE_HTTP3" = "true" ]; then
+  if nginx -V 2>&1 | grep -q -- "--with-http_v3_module"; then
+    USE_HTTP3=true
+  else
+    echo "HTTP/3 was requested but this nginx has no QUIC support; serving HTTP/1.1 and HTTP/2 only." >&2
+  fi
+fi
 
 # The certificates have to be readable by the worker process too, which runs as
 # the unprivileged "nginx" user, while in /ssl they are owned by root and
@@ -67,6 +82,29 @@ http_listen() {
   if [ "$ENABLE_IPV6" = "true" ]; then
     echo "    listen [::]:${spec}${d};"
   fi
+}
+
+# QUIC (HTTP/3) listeners, which are UDP and therefore separate sockets from
+# the TCP ones above. Alt-Svc is what tells a browser that HTTP/3 exists at
+# all: without it clients keep using HTTP/2 over TCP and never try.
+#
+# reuseport may appear only once per socket, and IPv4 and IPv6 are two - both
+# get it from the first server that asks, and nothing after that, or nginx
+# refuses to start with "duplicate listen options".
+QUIC_SOCKETS_OPENED=false
+quic_listen() {
+  [ "$USE_HTTP3" = "true" ] || return 0
+  local flag="${1:-}" opts=""
+  [ -n "$flag" ] && opts=" default_server"
+  if [ "$QUIC_SOCKETS_OPENED" != "true" ]; then
+    opts="${opts} reuseport"
+    QUIC_SOCKETS_OPENED=true
+  fi
+  echo "    listen ${LISTEN_PORT} quic${opts};"
+  if [ "$ENABLE_IPV6" = "true" ]; then
+    echo "    listen [::]:${LISTEN_PORT} quic${opts};"
+  fi
+  echo "    add_header Alt-Svc 'h3=\":${LISTEN_PORT}\"; ma=86400' always;"
 }
 
 # Certificate and key for one route, falling back to the global defaults.
@@ -125,6 +163,45 @@ EOF
 }
 
 sync_certs
+
+# gRPC cannot go through proxy_pass: it is HTTP/2 end to end, and proxy_pass
+# speaks HTTP/1.1 to the backend, which drops the trailers gRPC carries its
+# status in. nginx has a module for it, and grpc_pass accepts a variable the
+# same way proxy_pass does, so the resolver still applies and a backend that
+# restarts on a new address needs no reload.
+grpc_location() {
+  local target="$1" target_tls="$2" scheme="grpc"
+  [ "$target_tls" = "true" ] && scheme="grpcs"
+  echo "    location / {"
+  echo "      set \$upstream \"${target}\";"
+  echo "      grpc_pass ${scheme}://\$upstream;"
+  if [ "$target_tls" = "true" ]; then
+    # As for the HTTP routes: the backend is reached by container name or
+    # internal address, so its certificate has nothing to be verified against.
+    echo "      grpc_ssl_verify off;"
+  fi
+  cat <<'EOF'
+      grpc_set_header Host $host;
+      grpc_set_header X-Real-IP $remote_addr;
+      grpc_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      grpc_connect_timeout 5s;
+      # Long, because a streaming RPC is idle between messages by design.
+      grpc_read_timeout 3600s;
+      grpc_send_timeout 3600s;
+    }
+EOF
+}
+
+# Emits whichever location block the route's mode calls for.
+route_location() {
+  local route="$1" target="$2" target_tls="$3" mode
+  mode=$(jq -r '.mode // "http"' <<<"$route")
+  if [ "$mode" = "grpc" ]; then
+    grpc_location "$target" "$target_tls"
+  else
+    http_location "$target" "$target_tls"
+  fi
+}
 
 # The http module always owns the public HTTPS port. "tcp" routes (non-HTTP
 # protocols) each get a dedicated port instead, so there is no intermediate hop
@@ -188,6 +265,10 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
   echo "  access_log /dev/stdout combined;"
   echo "  server_names_hash_bucket_size 128;"
   echo "  client_max_body_size 0;"
+  # HTTP/2 is negotiated over ALPN, so a client that does not speak it simply
+  # gets HTTP/1.1. It is also what makes gRPC possible at all.
+  [ "$ENABLE_HTTP2" = "true" ] && echo "  http2 on;"
+  [ "$USE_HTTP3" = "true" ] && echo "  http3 on;"
   echo ""
   echo "  map \$http_upgrade \$connection_upgrade {"
   echo "    default upgrade;"
@@ -199,6 +280,7 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
   # configured Host.
   echo "  server {"
   http_listen "$HTTPS_LISTEN_SPEC" "default_server"
+  quic_listen "default_server"
   echo "    ssl_certificate ${DEFAULT_CERT};"
   echo "    ssl_certificate_key ${DEFAULT_KEY};"
   if [ -n "$DEFAULT_TARGET" ]; then
@@ -215,10 +297,11 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
     TARGET_TLS=$(jq -r '.target_tls // false' <<<"$route")
     echo "  server {"
     http_listen "$HTTPS_LISTEN_SPEC"
+    quic_listen
     echo "    server_name ${DOMAIN};"
     echo "    ssl_certificate $(route_cert "$route" cert);"
     echo "    ssl_certificate_key $(route_cert "$route" key);"
-    http_location "$TARGET" "$TARGET_TLS"
+    route_location "$route" "$TARGET" "$TARGET_TLS"
     echo "  }"
   done
 
@@ -235,7 +318,7 @@ HTTPS_LISTEN_SPEC="${LISTEN_PORT} ssl"
     echo "  server {"
     http_listen "$HTTP_PORT"
     echo "    server_name ${DOMAIN};"
-    http_location "$TARGET" "$TARGET_TLS"
+    route_location "$route" "$TARGET" "$TARGET_TLS"
     echo "  }"
   done
 

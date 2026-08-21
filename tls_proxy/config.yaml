@@ -1,5 +1,5 @@
 name: "TLS Proxy"
-version: "1.0.3"
+version: "1.1.0"
 slug: "tls_proxy"
 description: "TLS/HTTP reverse proxy (nginx): routes to internal services by domain, uses the certificate from the official Let's Encrypt add-on, optional failover with keepalived and a virtual IP."
 url: "https://github.com/domysh/ha-custom-addons"
@@ -19,6 +19,8 @@ options:
   listen_port: 443
   http_port: 80
   enable_ipv6: true
+  enable_http2: true
+  enable_http3: true
   cert_file: "fullchain.pem"
   key_file: "privkey.pem"
   default_target: ""
@@ -41,13 +43,15 @@ schema:
   listen_port: port
   http_port: port
   enable_ipv6: bool
+  enable_http2: bool
+  enable_http3: bool
   cert_file: str
   key_file: str
   default_target: str?
   routes:
     - domain: str
       target: str
-      mode: list(http|tcp)?
+      mode: list(http|tcp|grpc)?
       tcp_port: port?
       cert_file: str?
       key_file: str?

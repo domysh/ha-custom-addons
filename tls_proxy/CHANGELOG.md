@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.0
+
+- HTTP/2 on every HTTPS route, negotiated over ALPN so older clients are
+  unaffected. New `enable_http2` option, on by default.
+- HTTP/3 over QUIC on UDP `listen_port`, advertised per route with an `Alt-Svc`
+  header — without which clients never attempt it. New `enable_http3` option,
+  on by default. Support is probed with `nginx -V` at start-up rather than
+  assumed: a `listen ... quic` directive in a binary without QUIC is a start-up
+  failure, and this add-on is what everything else is published through, so a
+  build without it logs the fact and serves HTTP/1.1 and HTTP/2 instead. Note
+  that HTTP/3 needs UDP open on the router as well as TCP.
+- New route mode `grpc`, proxying with nginx's gRPC module. gRPC is HTTP/2 end
+  to end and carries its status in trailers, which an ordinary route drops on
+  the way to an HTTP/1.1 backend — calls then fail in ways that look like the
+  application's fault. Backend addresses stay resolvable at request time, and
+  the timeouts allow a streaming RPC to idle between messages.
+
 ## 1.0.2
 
 - Stop quickly, instead of waiting and then being killed. Shutdown asked nginx
