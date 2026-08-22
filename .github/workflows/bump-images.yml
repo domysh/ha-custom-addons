@@ -30,19 +30,24 @@ jobs:
       fail-fast: false
       matrix:
         # version_strategy:
-        #   tag        - the add-on's version follows the image tag one to one,
-        #                because the add-on is a thin wrapper around that
-        #                program and nothing else.
+        #   tag        - the add-on's version follows the image tag one to
+        #                one, because the add-on is a thin wrapper around that
+        #                program and nothing else. What the store offers as an
+        #                update is then literally the upstream release.
         #   patch-bump - the add-on's version has a scheme of its own (it
         #                describes the work in the add-on, not the base image),
-        #                so it is only incremented by a patch. Otherwise an
-        #                nginx bump would rewrite "1.0.0" as "1.31.4-alpine",
-        #                which is not this add-on's version.
+        #                so it is only incremented by a patch. Otherwise a base
+        #                image tag like "1.31.4-alpine" would be written into
+        #                the version field, which is not a version of the
+        #                add-on.
         include:
-          - addon: tls_proxy
-            image: nginx
-            tag_regex: '^[0-9]+\.[0-9]+\.[0-9]+-alpine$'
-            version_strategy: patch-bump
+          - addon: nginx_ui
+            image: uozi/nginx-ui
+            # Both "2.5.10" and "v2.5.10" are published for every release, plus
+            # `latest`, `dev`, `main` and a sha-<commit> tag per build. Only the
+            # bare three-number form is matched: it is a release, and it sorts.
+            tag_regex: '^[0-9]+\.[0-9]+\.[0-9]+$'
+            version_strategy: tag
     steps:
       - uses: actions/checkout@v4
 
