@@ -1,5 +1,111 @@
 # Changelog
 
+## 1.2.0
+
+The unit runner grew up. It started as enough of systemd to run a unit file,
+and unit files in the wild turned out to use a great deal more of systemd than
+that — so this reads most of what a service unit actually contains.
+
+Found by a real failure: `tailscaled` refusing to start with `invalid value ""
+for flag -port: can't be the empty string`. Its unit has `Environment="PORT=41641"`
+and `ExecStart=... --port=${PORT}`. systemd strips those quotes; this did not,
+so the assignment was to a variable named `"PORT`, which is not a valid name,
+so it silently did not happen, so `${PORT}` expanded to nothing. Values are now
+split the way systemd splits them — quotes removed, several assignments per
+line, `\` escapes inside double quotes — and the same parser reads
+`EnvironmentFile=`, which used to be *sourced* as a shell script (it is not
+one: a value with spaces was mangled and anything executable in it ran).
+
+That unit needed three more things this did not do, and now does:
+
+- **`RuntimeDirectory=`, `StateDirectory=`, `CacheDirectory=`,
+  `LogsDirectory=`, `ConfigurationDirectory=`** with their `*Mode=`, created
+  before the service starts and owned by its `User=`. Without them a daemon
+  that expects `/run/<name>` to be there fails in a way that reads as its own
+  fault — `tailscaled` cannot create its socket and exits.
+  `RuntimeDirectory=` is removed again when the unit stops, unless
+  `RuntimeDirectoryPreserve=` says otherwise.
+- **`ExecStopPost=`**, and `ExecStop=`/`ExecReload=`/`ExecStartPre=`/
+  `ExecStartPost=` as repeatable lists rather than one line each. `ExecStop`
+  now runs on `systemctl stop`, `ExecStopPost` whenever the service stops,
+  however it stopped — which is what runs `tailscaled --cleanup`.
+- **`Type=notify`** is still run as `simple`, but `NOTIFY_SOCKET` is now
+  deliberately left unset, which `sd_notify()` treats as "no manager
+  listening". It was never set before either; the difference is that this is
+  now written down as a decision rather than an omission.
+
+Two bugs that predate all of this, both found by testing rather than by use:
+
+- **A service's exit status was always read as 0.** The status was taken from
+  `PIPESTATUS` *after* a `set +m` — and `set` is itself a pipeline, so it
+  overwrote the value being read. `Restart=on-failure` could therefore never
+  see a failure, and a crashed service was logged as "exited with status 0".
+- **`Type=forking` never worked**, despite being listed as supported. The
+  start command's output went through the same pipeline as everything else,
+  and a pipeline does not end until every process holding it has exited — the
+  forked daemon inherits it, so the supervisor waited for the daemon it was
+  supposed to be *starting*. Forking units now have their own path: the
+  initial process's output goes straight to the unit's log, the `PIDFile=` is
+  removed first so a stale one cannot be read as the new PID, and the daemon
+  named in it is what gets watched and stopped.
+
+The rest, in one list:
+
+- `[Unit]` dependencies are acted on: `Requires=`, `Requisite=`, `Wants=` and
+  `BindsTo=` are pulled in when a unit is started, ordered by `After=`/
+  `Before=`; a failed `Requires=` stops the start where a failed `Wants=` only
+  reports; `Conflicts=` is stopped first; and stopping a unit stops whatever
+  declares `PartOf=` or `BindsTo=` it. The boot sequence is ordered the same
+  way instead of starting everything at once.
+- `Condition*=` and `Assert*=` on paths, files, directories, users, groups,
+  the kernel command line, the host name and virtualisation, with `!`
+  negation. An unmet condition is a skip, not a failure — as in systemd — and
+  `ConditionVirtualization=no` is honestly false in here.
+- **Drop-ins**: `<unit>.d/*.conf` in every unit directory, template drop-ins
+  included, applied in file-name order. Which needed the other half of the
+  rule to be useful: an empty assignment (`ExecStart=`) clears the list before
+  the new value is added, which is how a drop-in replaces a command instead of
+  adding a second one.
+- **Masking**: `systemctl mask`/`unmask`, and a masked unit is refused
+  everywhere, including at boot. Masking a unit file that lives in
+  `/etc/systemd/system` is refused rather than allowed to overwrite it — the
+  unmask would have deleted it.
+- `enable` honours the unit's own `[Install]` section — `WantedBy=`,
+  `RequiredBy=`, `Also=`, `Alias=` — instead of always linking into
+  `multi-user.target.wants`.
+- A **failed** state that survives the process: `systemctl is-failed`,
+  `reset-failed`, and `status` showing the exit status that caused it.
+  `RemainAfterExit=yes` reports `active (exited)`, so a `oneshot` that set
+  something up still counts as in effect.
+- `Restart=` understands `on-success`, `on-abnormal` and `on-abort` alongside
+  `always`/`on-failure`, plus `SuccessExitStatus=`,
+  `RestartPreventExitStatus=` and `RestartForceExitStatus=`. Time values are
+  parsed as systemd writes them (`100ms`, `5s`, `1min 30s`, `infinity`).
+- Stopping honours `KillMode=`, `KillSignal=`, `FinalKillSignal=` and
+  `SendSIGKILL=`; `TimeoutStopSec=infinity` is capped, because the Supervisor
+  gives the container ten seconds and a promise nothing can keep is worse than
+  a number.
+- Per-process limits are applied: `Limit*` (as `ulimit`), `Nice=`, `UMask=`,
+  `OOMScoreAdjust=`, `Group=` and `SupplementaryGroups=` (`User=` alone used
+  to pass the user name as the group). Cgroup resource control stays ignored,
+  and DOCS.md says why.
+- `StandardOutput=`/`StandardError=`: `null`, `file:`, `append:`, `inherit`,
+  with an unwritable target falling back to the unit log instead of killing
+  the service. `SyslogIdentifier=` sets the tag its lines carry.
+- New commands: `show` (KEY=VALUE properties, which is what installers parse),
+  `list-dependencies`, `kill --signal=`, `reenable`, `try-restart`,
+  `reload-or-restart`, `is-failed`, `reset-failed`, `mask`, `unmask`, and
+  `list-units --all --type=`. `status` lists drop-ins and exits 3 for an
+  inactive unit, as systemd's does.
+- The full specifier set (`%t %S %C %L %E %h %u %U %H %m %b %p %P %f %j` and
+  the ones that were already there), so `RuntimeDirectory=%p` and friends
+  resolve to the same paths this creates.
+- **`journalctl`**: `-u`, `-f`, `-n`, `-r`, `--list-units`. There is no
+  journal, but every unit's output is captured to a file, and the command
+  people reach for while a service misbehaves now works on those files. The
+  options that need a real journal (`-b`, `--since`) say so rather than
+  quietly returning something else.
+
 ## 1.1.1
 
 - Stop handing over to a real `systemctl` when one is on disk. Packages that

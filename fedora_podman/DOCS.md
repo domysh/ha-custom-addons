@@ -399,47 +399,105 @@ that place. The choice is between a host filesystem and a real init, and this
 add-on exists for the former.
 
 So `systemctl` is a replacement that reads the same unit files, from the same
-places — `/etc/systemd/system`, `/usr/local/lib/systemd/system`,
-`/usr/lib/systemd/system` — and runs them:
+places — `/etc/systemd/system`, `/run/systemd/system`,
+`/usr/local/lib/systemd/system`, `/usr/lib/systemd/system`, drop-ins in
+`<unit>.d/*.conf` included — and runs them:
 
 ```sh
-systemctl start | stop | restart | reload UNIT
+systemctl start | stop | restart | try-restart UNIT
+systemctl reload | reload-or-restart UNIT
+systemctl kill [--signal=HUP] UNIT
 systemctl enable | disable [--now] UNIT
-systemctl status [UNIT]          # state, main PID, and the tail of its log
-systemctl is-active | is-enabled UNIT
-systemctl list-units             # everything found, and what it is doing
-systemctl cat UNIT               # the file, and where it came from
+systemctl reenable | mask | unmask UNIT
+systemctl status [UNIT]              # state, main PID, drop-ins, tail of its log
+systemctl is-active | is-enabled | is-failed UNIT
+systemctl reset-failed [UNIT]
+systemctl show [-p MainPID] UNIT     # properties, as KEY=VALUE
+systemctl list-units [--all] [--type=service]
+systemctl list-dependencies UNIT
+systemctl cat UNIT                   # the file, its drop-ins, and where they are
 ```
 
-`enable` links the unit into `multi-user.target.wants`, exactly as systemd
-does. That directory is on `/etc`, which is on the add-on's persistent layer,
-so what you enable once is started again every time the add-on starts.
+`enable` links the unit into the `.wants` directory of every target its
+`[Install]` section names — `multi-user.target` when it names none — exactly as
+systemd does. Those directories are on `/etc`, which is on the add-on's
+persistent layer, so what you enable once is started again every time the
+add-on starts, in the order `After=` asks for.
 
 Logs are per unit under `/var/log/addon-units/`, rotated at 5 MB, and units the
 add-on started at boot also log to the Home Assistant add-on log, tagged with
-the unit name. `systemctl status` shows the last dozen lines.
+the unit name (or with `SyslogIdentifier=`). There is no journal, but the
+command people reach for works on those files:
+
+```sh
+journalctl -u tailscaled -f       # follow one unit
+journalctl -u tailscaled -n 100   # its last hundred lines
+journalctl --list-units           # everything that has logged
+```
 
 ### What is honoured, and what is not
 
-Supported: `Type=simple`, `exec`, `notify`, `idle`, `oneshot` and `forking`;
-`ExecStart`, `ExecStartPre`, `ExecStartPost`, `ExecStop`, `ExecReload`;
-`Environment=` and `EnvironmentFile=` (including the leading `-` for "skip if
-missing"); `WorkingDirectory=`; `User=`; `Restart=` with `RestartSec=`;
-`TimeoutStopSec=`; `WantedBy=`; line continuations; and template units
-(`foo@bar.service`) with the `%i`, `%I`, `%n` and `%N` specifiers.
+**`[Unit]`** — `Description`, `Documentation`, `After`, `Before`, `Requires`,
+`Requisite`, `Wants`, `BindsTo`, `PartOf`, `Conflicts`, and the `Condition*` /
+`Assert*` checks on paths, files, directories, users, groups, the kernel
+command line, the host name and virtualisation (this is a container, so
+`ConditionVirtualization=container` is true and `=no` is false).
 
-Not supported, and ignored rather than half-applied: socket, timer and path
-activation; the `Type=notify` readiness protocol (such a unit is run as
-`simple`); dependency ordering beyond "everything enabled starts at boot";
-resource limits; and the sandboxing directives — `PrivateTmp`,
-`ProtectSystem`, `NoNewPrivileges` and the rest — because in here the add-on
-*is* the sandbox, and pretending otherwise would be worse than not pretending.
+Starting a unit pulls in what it `Requires=` and `Wants=`, ordered by `After=`;
+a failed `Requires=` stops the start, a failed `Wants=` only says so. Stopping
+one stops whatever declares `PartOf=` or `BindsTo=` it. `Conflicts=` is stopped
+first.
 
-Two differences worth knowing. `Restart=` is applied with a backoff that grows
-to a minute, so a misconfigured service cannot spin; a unit that ran for over a
-minute gets its short delay back. And stopping a unit signals its whole process
-group, which is the closest thing here to systemd stopping a cgroup: a daemon
-that forked helpers does not leave them behind.
+**`[Service]`** — `Type=simple`, `exec`, `idle`, `notify`, `oneshot` and
+`forking`; `ExecCondition`, `ExecStartPre`, `ExecStart` (several lines for
+`oneshot`), `ExecStartPost`, `ExecReload`, `ExecStop`, `ExecStopPost`;
+`Environment=` and `EnvironmentFile=`; `WorkingDirectory`, `RootDirectory`,
+`User`, `Group`, `SupplementaryGroups`, `UMask`, `Nice`, `OOMScoreAdjust` and
+`Limit*`; `PIDFile`; `Restart=` with `RestartSec`, `SuccessExitStatus`,
+`RestartPreventExitStatus` and `RestartForceExitStatus`; `RemainAfterExit`;
+`TimeoutStartSec` and `TimeoutStopSec`; `KillMode`, `KillSignal`,
+`FinalKillSignal` and `SendSIGKILL`; `RuntimeDirectory`, `StateDirectory`,
+`CacheDirectory`, `LogsDirectory`, `ConfigurationDirectory` with their
+`*Mode=` and `RuntimeDirectoryPreserve=`; `StandardOutput=` and
+`StandardError=` (`journal`, `null`, `file:`, `append:`, `inherit`);
+`SyslogIdentifier`.
+
+**`[Install]`** — `WantedBy`, `RequiredBy`, `Also`, `Alias`.
+
+**Files** — drop-ins, masking (a symlink to `/dev/null`, and masking a unit
+file that lives in `/etc/systemd/system` is refused rather than allowed to
+delete it), line continuations, template units (`foo@bar.service`), and the
+specifiers `%i %I %n %N %p %P %f %j %t %S %C %L %E %T %V %h %u %U %H %m %b %%`.
+
+Not supported, and ignored rather than half-applied:
+
+- **Socket, timer, path and D-Bus activation.** There is no bus and no event
+  loop here, so a unit that is only ever started by one of those is never
+  started. Targets are synchronisation points with nothing to execute, so they
+  are inert: pulling one in starts the services *it* wants, not the target.
+- **The `Type=notify` readiness protocol.** Such a unit runs as `simple`, and
+  `NOTIFY_SOCKET` is deliberately left unset — which `sd_notify()` reads as
+  "no manager is listening" and turns into a no-op, so the daemon runs; it just
+  has nowhere to report readiness to. A unit whose `ExecStartPost` waits for
+  that readiness will wait in vain.
+- **The sandboxing directives** — `PrivateTmp`, `ProtectSystem`,
+  `NoNewPrivileges`, `DynamicUser`, the capability sets. In here the add-on
+  *is* the sandbox, and a half-applied confinement is worse than an honest
+  none.
+- **Resource control** — `CPUQuota`, `MemoryMax` and the other cgroup knobs.
+  The add-on's own cgroup belongs to the Supervisor, and carving it up per
+  service is not something to do behind your back. `Limit*` *is* applied,
+  because it is per-process (`setrlimit`) and needs no cgroup.
+
+Three differences worth knowing. `Restart=` is applied with a backoff that
+grows to a minute, so a misconfigured service cannot spin; a unit that ran for
+over a minute gets its short delay back. Stopping a unit signals its whole
+process group — the closest thing here to systemd stopping a cgroup — so a
+daemon that forked helpers does not leave them behind, and `KillMode=` chooses
+between that and the main process alone. And `Exec*` lines are run through a
+shell, which is more permissive than systemd, not less: the difference only
+shows with shell metacharacters, and `${VAR}` expands from the unit's own
+environment either way.
 
 ### VPN clients and `/dev/net/tun`
 
@@ -490,10 +548,12 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-The one rule that matters: **the command must stay in the foreground.** A unit
-whose `ExecStart` daemonises (`Type=forking` without a `PIDFile=`) leaves
-nothing to supervise, and the service is restarted for ever as though it kept
-exiting.
+The one rule that matters: **either the command stays in the foreground, or it
+says where it went.** A unit whose `ExecStart` daemonises needs
+`Type=forking` *and* a `PIDFile=`; that PID is then the unit's, and it is
+watched and stopped like any other. `Type=forking` without a `PIDFile=` leaves
+nothing to supervise and nothing to stop — the add-on says so in the log and
+leaves it alone rather than restarting a program that is already running.
 
 ## Resetting the add-on
 
