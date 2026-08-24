@@ -435,6 +435,30 @@ journalctl -u tailscaled -n 100   # its last hundred lines
 journalctl --list-units           # everything that has logged
 ```
 
+### What the add-on starts at boot
+
+What you enabled here — not everything that is enabled.
+
+A Fedora image arrives with units already linked into `/etc/systemd/system`:
+`getty@tty1`, the `systemd-*` services and sockets, first-boot maintenance like
+`selinux-autorelabel-mark` and `rpmdb-rebuild`, and — because this add-on
+installs `openssh-server` — `sshd.service`. Nobody chose those here; they are
+what each package's preset did while the image was being built, for a machine
+that boots with a real systemd.
+
+So the set the image came with is recorded when the image is built, and the
+add-on starts what was enabled *since*: by you over SSH, or by a package you
+installed at runtime. `systemctl enable` records the unit, so enabling
+something the image already had works too, and means it. `systemctl list-units`
+still shows everything, and the add-on log says how many it left alone.
+
+**`sshd.service` is the exception that is always refused.** This add-on *is* an
+sshd — it is how you get in — and two of them cannot hold the same port. If the
+distribution's sshd starts first, the add-on's own fails to bind and the add-on
+exits with `Address already in use`, which leaves no way in to undo it. Use the
+`ssh_port` option to move the add-on's; a second sshd is not something to run
+in here.
+
 ### What is honoured, and what is not
 
 **`[Unit]`** — `Description`, `Documentation`, `After`, `Before`, `Requires`,

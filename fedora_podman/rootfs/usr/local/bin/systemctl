@@ -344,6 +344,9 @@ cmd_enable() {
     name="${UNIT_NAME}"
 
     install_links "${name}"
+    # Recorded as well as linked: the add-on starts what was enabled here, not
+    # what the base image arrived with enabled. See addon-units.sh.
+    unit_record_optin "${name}"
     log "${name} will start when the add-on starts."
 
     for also in ${U_ALSO[@]+"${U_ALSO[@]}"}; do
@@ -374,6 +377,7 @@ cmd_disable() {
             removed=1
         fi
     done
+    unit_forget_optin "${name}"
     [ "${removed}" -eq 1 ] || log "${name} was not enabled."
 
     [ -n "${NOW}" ] && cmd_stop "${name}"

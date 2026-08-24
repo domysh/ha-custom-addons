@@ -69,6 +69,12 @@
 : "${UNIT_CONFIG_ROOT:=/etc}"
 : "${UNIT_RUNTIME_ROOT:=/run}"
 : "${UNIT_LOG_MAX_BYTES:=$((5 * 1024 * 1024))}"
+# What the base image came with enabled, written when the image is built. See
+# unit_starts_at_boot for what it is for.
+: "${UNIT_BASELINE_FILE:=/usr/local/share/addon-units/image-enabled}"
+# What was enabled *here*, by you or by an installer, which is what the add-on
+# starts. On /etc, so it is on the persistent layer with the links themselves.
+: "${UNIT_OPTIN_FILE:=/etc/addon-units/enabled}"
 # TimeoutStopSec=infinity would mean "wait for ever", which in an add-on whose
 # container is killed ten seconds into a stop is a promise nothing can keep.
 : "${UNIT_TIMEOUT_CAP:=900}"
@@ -756,6 +762,80 @@ unit_enabled_units() {
     done | sort -u
 }
 
+# --- what the add-on starts at boot ------------------------------------------
+#
+# "Enabled" and "started by this add-on" are not the same set, and conflating
+# them is how a Fedora image full of systemd's own plumbing ends up being run
+# by something that is not systemd.
+#
+# A Fedora image arrives with units already linked into /etc/systemd/system:
+# getty@tty1, the systemd-* services and sockets, first-boot maintenance like
+# selinux-autorelabel-mark and rpmdb-rebuild - and, because this add-on
+# installs openssh-server, sshd.service. None of those were a decision anybody
+# made here; they are what the packages' own presets did while the image was
+# being built. Starting them ranges from noise (conditions that cannot be met
+# in a container, logged every start) to fatal: the distribution's sshd binds
+# port 22 before the add-on's own sshd gets there, and the add-on then exits
+# with "Address already in use" - taking with it the shell you would have used
+# to turn it off.
+#
+# So the enabled set the image shipped with is recorded at build time, and what
+# is started here is what was enabled *since* - by you over SSH, or by a
+# package installed at runtime. `systemctl enable` records the unit, so
+# enabling something the image already had also works, and means it.
+
+# Written by the Dockerfile, once, after everything is installed.
+unit_write_baseline() {
+    mkdir -p "${UNIT_BASELINE_FILE%/*}"
+    unit_enabled_units > "${UNIT_BASELINE_FILE}"
+    printf 'Recorded %s units the image came with enabled.\n' \
+        "$(wc -l < "${UNIT_BASELINE_FILE}")"
+}
+
+# `systemctl enable` calls this: it is what makes a unit one of ours.
+unit_record_optin() {
+    local name="$1"
+    mkdir -p "${UNIT_OPTIN_FILE%/*}" 2>/dev/null || return 0
+    grep -Fxq "${name}" "${UNIT_OPTIN_FILE}" 2>/dev/null && return 0
+    printf '%s\n' "${name}" >> "${UNIT_OPTIN_FILE}" 2>/dev/null || true
+    return 0
+}
+
+unit_forget_optin() {
+    local name="$1" tmp
+    [ -f "${UNIT_OPTIN_FILE}" ] || return 0
+    tmp="${UNIT_OPTIN_FILE}.tmp.$$"
+    grep -Fxv "${name}" "${UNIT_OPTIN_FILE}" > "${tmp}" 2>/dev/null
+    mv -f "${tmp}" "${UNIT_OPTIN_FILE}" 2>/dev/null || rm -f "${tmp}"
+    return 0
+}
+
+# Sets UNIT_SKIP_REASON when the answer is no.
+unit_starts_at_boot() {
+    local name="$1"
+    UNIT_SKIP_REASON=""
+
+    # The one hard case. This add-on *is* an sshd - it is how you get in - and
+    # two of them cannot hold the same port. Enabling the distribution's makes
+    # the add-on fail to start, which leaves no way in to undo it, so this one
+    # is refused rather than left to the opt-in below.
+    case "${name}" in
+        sshd.service | ssh.service | sshd.socket | ssh.socket | sshd@*.service)
+            UNIT_SKIP_REASON="the add-on runs its own sshd; set its port with the ssh_port option"
+            return 1
+            ;;
+    esac
+
+    # Enabled here beats anything the image did.
+    grep -Fxq "${name}" "${UNIT_OPTIN_FILE}" 2>/dev/null && return 0
+
+    if [ -f "${UNIT_BASELINE_FILE}" ] && grep -Fxq "${name}" "${UNIT_BASELINE_FILE}" 2>/dev/null; then
+        UNIT_SKIP_REASON="the base image came with it enabled"
+        return 1
+    fi
+    return 0
+}
+
 # --- running -----------------------------------------------------------------
 
 # systemd's Exec* lines may start with prefixes: "-" ignore failure, ":" no
@@ -1419,7 +1499,7 @@ fi
 # first gets that, which is as much of systemd's ordering as makes sense
 # without targets to synchronise on.
 unit_start_enabled() {
-    local name file started=() enabled=()
+    local name file started=() enabled=() skipped=()
 
     mkdir -p "${UNIT_RUN_DIR}" "${UNIT_LOG_DIR}"
 
@@ -1441,6 +1521,16 @@ unit_start_enabled() {
 
     while IFS= read -r name; do
         [ -n "${name}" ] || continue
+
+        if ! unit_starts_at_boot "${name}"; then
+            skipped+=("${name}")
+            case "${UNIT_SKIP_REASON}" in
+                "the add-on runs its own sshd"*)
+                    log "Not starting ${name}: ${UNIT_SKIP_REASON}."
+                    ;;
+            esac
+            continue
+        fi
 
         if ! file="$(unit_file "${name}")"; then
             warn "Enabled unit ${name} has no unit file any more; skipping it."
@@ -1469,6 +1559,10 @@ unit_start_enabled() {
     if [ "${#started[@]}" -gt 0 ]; then
         log "Started enabled units: ${started[*]}"
         log "Manage them with systemctl; their logs are in ${UNIT_LOG_DIR} and journalctl reads them"
+    fi
+    if [ "${#skipped[@]}" -gt 0 ]; then
+        log "Left alone (the base image came with them enabled): ${#skipped[@]} units."
+        log "'systemctl enable <unit>' starts one of them here too; 'systemctl list-units' shows them."
     fi
     return 0
 }
