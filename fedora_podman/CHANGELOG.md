@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.1
+
+- **Only start units that were enabled here.** 1.2.0 widened the boot scan from
+  `multi-user.target.wants` to every `.wants`/`.requires` directory, which is
+  what systemd does — and swept up everything a Fedora image arrives with
+  enabled: `getty@tty1`, the `systemd-*` services and sockets, first-boot
+  maintenance like `selinux-autorelabel-mark` and `rpmdb-rebuild`, and
+  `sshd.service`, which this add-on installs `openssh-server` for.
+
+  The last one is fatal rather than noisy: the distribution's sshd binds port
+  22 before the add-on's own gets there, so the add-on exits with `Address
+  already in use` on every start — and since its sshd is how you get in, there
+  is no way left to turn the offending unit off.
+
+  The set the image came with enabled is now recorded when the image is built,
+  and the boot starts what was enabled *since* — by you, or by a package
+  installed at runtime. `systemctl enable` records the unit, so enabling
+  something the image already had works too. `sshd.service` is refused either
+  way, with a line in the log saying so and pointing at the `ssh_port` option.
+
 ## 1.2.0
 
 The unit runner grew up. It started as enough of systemd to run a unit file,

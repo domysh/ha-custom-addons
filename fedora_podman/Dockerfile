@@ -131,6 +131,14 @@ RUN chmod 0755 \
         /usr/local/bin/inspect-runtime.sh \
         /usr/local/lib/addon-units.sh
 
+# Record which units this image arrived with enabled, so the add-on can tell
+# them apart from the ones you enable later - the first set is systemd's own
+# plumbing (getty@tty1, the systemd-* services, first-boot maintenance) plus
+# sshd.service, which the packages' presets linked while the image was being
+# built and which nothing here should run. It has to be the last step: every
+# dnf above may have enabled something.
+RUN bash -c 'source /usr/local/lib/addon-units.sh && unit_write_baseline'
+
 LABEL io.hass.type="addon"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
