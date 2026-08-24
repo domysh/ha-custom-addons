@@ -111,16 +111,19 @@ RUN set -eux; \
 COPY rootfs /
 
 # The entrypoint and the user-facing commands are executed; the configure-*.sh
-# files and the unit library are sourced by them. The systemctl here is not
-# systemd - which cannot run in this add-on at all, see addon-units.sh - but a
-# replacement that reads the unit files packages install. /usr/local/bin
-# precedes /usr/bin in PATH, and it defers to a real systemctl if one is ever
-# installed.
+# files and the unit library are sourced by them. The systemctl and journalctl
+# here are not systemd's - neither systemd nor journald can run in this add-on
+# at all, see addon-units.sh - but replacements that read the unit files
+# packages install and the logs those units write. /usr/local/bin precedes
+# /usr/bin in PATH, so they answer even when a package pulls the real systemd
+# in for its scriptlets; they deliberately do not hand over to it, because it
+# could only refuse.
 RUN chmod 0755 \
         /usr/local/bin/entrypoint.sh \
         /usr/local/bin/podman-diag \
         /usr/local/bin/addon-reset \
         /usr/local/bin/systemctl \
+        /usr/local/bin/journalctl \
     && chmod 0644 \
         /usr/local/bin/configure-podman.sh \
         /usr/local/bin/configure-ssh.sh \

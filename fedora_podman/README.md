@@ -29,7 +29,9 @@ appear in the store at all).
   starts, whatever restart policy they carry.
 - Services from their own systemd unit files, without systemd: `dnf install`
   a package, `systemctl enable --now` it, and it runs and comes back after a
-  restart.
+  restart. Drop-ins, `Environment=`, `RuntimeDirectory=`, `Restart=`,
+  conditions, dependencies and `Type=forking` behave as the unit file says;
+  `journalctl -u` reads the logs.
 
 ## Quick start
 
@@ -70,6 +72,7 @@ rootfs/
   usr/local/bin/addon-reset            queue a reset of storage / system layer
   usr/local/lib/addon-units.sh         reads and runs systemd unit files
   usr/local/bin/systemctl              the systemd replacement built on it
+  usr/local/bin/journalctl             reads what those units logged
 DOCS.md         user-facing documentation (shown in the add-on UI)
 CHANGELOG.md    version history
 ```

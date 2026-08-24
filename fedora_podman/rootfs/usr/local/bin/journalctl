@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# journalctl for an add-on that has no journal.
+#
+# There is no journald here - see /usr/local/lib/addon-units.sh for why there
+# is no systemd either - but every unit this add-on runs has its output
+# captured to a file of its own under /var/log/addon-units/, tagged with the
+# unit name. That is close enough to a journal that the command people reach
+# for should work, so it does: `journalctl -u foo -f` follows a service, which
+# is the one thing anybody uses this for while a service is misbehaving.
+#
+# What is not here is everything that needs an indexed journal: -b (there are
+# no boots to select between - the add-on's own restart is the boundary, and
+# each start truncates nothing, so the file spans them), --since/--until with
+# real timestamps, priority filtering, and the binary export formats. Those are
+# accepted and ignored where ignoring them still gives the right answer, and
+# refused where it would not.
+set -uo pipefail
+
+# shellcheck source=../lib/addon-units.sh
+source /usr/local/lib/addon-units.sh
+
+err() { printf '%s\n' "$*" >&2; }
+
+usage() {
+    cat <<'USAGE'
+Usage: journalctl [OPTIONS]
+
+  -u, --unit=UNIT     one unit's log (repeatable); without it, every unit's
+  -f, --follow        keep printing as lines are written
+  -n, --lines=N       the last N lines (default 30; "all" for everything)
+  -e                  jump to the end, which is what -n already does here
+  -r, --reverse       newest first
+  --no-pager          accepted; there is no pager here anyway
+  --list-units        the units that have a log
+
+Logs live in /var/log/addon-units/<unit>.log, rotated at 5 MB to <unit>.log.1,
+and are plain text: grep, tail and less work on them directly.
+USAGE
+}
+
+UNITS=()
+FOLLOW=""
+LINES="30"
+REVERSE=""
+
+# The files for one unit, oldest first, so a rotated log reads in order.
+unit_log_files() {
+    local name="$1" file
+    file="$(unit_log_file "${name}")"
+    [ -e "${file}.1" ] && printf '%s\n' "${file}.1"
+    [ -e "${file}" ] && printf '%s\n' "${file}"
+    return 0
+}
+
+list_logged_units() {
+    local file
+    for file in "${UNIT_LOG_DIR}"/*.log; do
+        [ -e "${file}" ] || continue
+        file="${file##*/}"
+        printf '%s\n' "${file%.log}"
+    done
+    return 0
+}
+
+main() {
+    local a expect="" files=() name
+
+    for a in "$@"; do
+        if [ -n "${expect}" ]; then
+            case "${expect}" in
+                unit) UNITS+=("$(unit_full_name "${a}")") ;;
+                lines) LINES="${a}" ;;
+            esac
+            expect=""
+            continue
+        fi
+        case "${a}" in
+            -u | --unit) expect="unit" ;;
+            --unit=*) UNITS+=("$(unit_full_name "${a#--unit=}")") ;;
+            -f | --follow) FOLLOW=1 ;;
+            -n | --lines) expect="lines" ;;
+            --lines=* | -n*) LINES="${a#*n}"; LINES="${LINES#=}" ;;
+            -r | --reverse) REVERSE=1 ;;
+            --list-units) list_logged_units; return 0 ;;
+            -e | --pager-end | --no-pager | --no-hostname | --no-full | -a | --all | \
+            --system | -q | --quiet | -x | --catalog | --utc) ;;
+            -h | --help) usage; return 0 ;;
+            -b | --boot | -k | --dmesg | --since=* | --until=*)
+                err "journalctl ${a} needs a real journal, which this add-on does not have."
+                err "The logs it does have are plain files in ${UNIT_LOG_DIR}."
+                return 1
+                ;;
+            -*) ;;
+            *) UNITS+=("$(unit_full_name "${a}")") ;;
+        esac
+    done
+
+    if [ "${#UNITS[@]}" -gt 0 ]; then
+        for name in "${UNITS[@]}"; do
+            while IFS= read -r a; do
+                [ -n "${a}" ] && files+=("${a}")
+            done < <(unit_log_files "${name}")
+        done
+        if [ "${#files[@]}" -eq 0 ]; then
+            err "No log for: ${UNITS[*]}"
+            err "Units log from their first start; 'systemctl status' says whether one ran."
+            return 1
+        fi
+    else
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            while IFS= read -r a; do
+                [ -n "${a}" ] && files+=("${a}")
+            done < <(unit_log_files "${name}")
+        done < <(list_logged_units)
+        if [ "${#files[@]}" -eq 0 ]; then
+            err "No unit has logged anything yet (${UNIT_LOG_DIR} is empty)."
+            return 1
+        fi
+    fi
+
+    if [ -n "${FOLLOW}" ]; then
+        # -q so tail does not print a header per file when following several,
+        # which would interrupt the stream; each line already carries its unit.
+        exec tail -q -n "${LINES}" -f "${files[@]}"
+    fi
+
+    case "${LINES}" in
+        all | "") cat "${files[@]}" ;;
+        *[!0-9]*) err "--lines takes a number, or 'all'."; return 1 ;;
+        *) tail -q -n "${LINES}" "${files[@]}" ;;
+    esac | { if [ -n "${REVERSE}" ]; then tac; else cat; fi; }
+    return 0
+}
+
+main "$@"

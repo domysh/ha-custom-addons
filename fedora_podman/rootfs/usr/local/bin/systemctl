@@ -23,226 +23,587 @@ set -uo pipefail
 # shellcheck source=../lib/addon-units.sh
 source /usr/local/lib/addon-units.sh
 
-log() { printf '%s\n' "$*"; }
+log() { [ -n "${QUIET}" ] || printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
+
+QUIET=""
+FORCE=""
+NOW=""
+LIST_TYPE=""
+LIST_ALL=""
+SIGNAL="TERM"
+SHOW_PROPERTY=""
 
 usage() {
     cat <<'USAGE'
 Usage: systemctl COMMAND [UNIT...]
 
-  start | stop | restart | reload UNIT
-  enable | disable [--now] UNIT     start it at add-on start, or stop doing so
+Running things
+  start | stop | restart | try-restart UNIT
+  reload | reload-or-restart UNIT
+  kill [--signal=SIG] UNIT
+
+Deciding what runs at add-on start
+  enable | disable [--now] UNIT     link it into its target's .wants, or unlink
+  reenable | preset UNIT            re-apply the unit's own [Install] section
+  mask | unmask UNIT                make it unstartable, by anything
+
+Looking
   status [UNIT]                     state, main PID and the tail of its log
-  is-active | is-enabled UNIT       for scripts; exit status carries the answer
-  list-units                        every unit found, and what it is doing
-  cat UNIT                          the unit file, and where it came from
+  is-active | is-enabled | is-failed UNIT   for scripts; the exit status answers
+  reset-failed [UNIT]               forget a failure
+  show [-p PROPERTY] UNIT           properties, as KEY=VALUE
+  list-units | list-unit-files [--type=service] [--all]
+  list-dependencies UNIT            what starting it pulls in
+  cat UNIT                          the unit file, its drop-ins, and their paths
   daemon-reload                     accepted and does nothing: nothing is cached
 
-Units are read from /etc/systemd/system, /usr/local/lib/systemd/system and
-/usr/lib/systemd/system, so a package's own unit file works as installed.
-Enabling one links it into multi-user.target.wants, which lives on the add-on's
-persistent layer, and the add-on starts everything linked there when it boots.
+Units are read from /etc/systemd/system, /run/systemd/system,
+/usr/local/lib/systemd/system and /usr/lib/systemd/system, drop-ins in
+<unit>.d/*.conf included, so a package's own unit file works as installed.
+Enabling one links it into the .wants directory of every target its [Install]
+section names, which lives on the add-on's persistent layer, and the add-on
+starts everything linked there when it boots, ordered by After=.
 
-Logs are per unit, in /var/log/addon-units/, and also go to the Home Assistant
-add-on log for units the add-on started itself.
+Logs are per unit in /var/log/addon-units/, readable with journalctl -u UNIT,
+and units the add-on started itself also go to the Home Assistant add-on log.
 USAGE
 }
 
 # Loads a unit, or explains why it cannot be loaded and exits.
 load_unit_or_die() {
-    local name file
-    name="$(unit_full_name "$1")"
-    if ! file="$(unit_file "${name}")"; then
-        err "Unit ${name} not found in: ${UNIT_PATHS[*]}"
-        exit 4
-    fi
-    if ! unit_parse "${name}" "${file}"; then
-        err "Unit ${name} has no ExecStart; only services that run a command are supported."
-        exit 5
-    fi
-    UNIT_NAME="${name}"
-    UNIT_FILE="${file}"
+    local name="${1:-}" status=0
+
+    [ -n "${name}" ] || { err "This command needs a unit name."; exit 2; }
+    unit_load "${name}" || status=$?
+    name="$(unit_full_name "${name}")"
+    case "${status}" in
+        0) ;;
+        1) err "Unit ${name} not found in: ${UNIT_PATHS[*]}"; exit 4 ;;
+        2) err "Unit ${name} is masked."; exit 1 ;;
+        3)
+            case "${name}" in
+                *.target) err "Unit ${name} is a target: it groups other units and runs nothing itself." ;;
+                *.socket | *.timer | *.path)
+                    err "Unit ${name} is ${name##*.}-activated, which needs a systemd to do the activating." ;;
+                *) err "Unit ${name} has no ExecStart; only services that run a command are supported." ;;
+            esac
+            exit 5
+            ;;
+    esac
+    UNIT_NAME="${U_NAME}"
+    UNIT_FILE="${U_FILE}"
+    return 0
 }
 
-cmd_start() {
-    load_unit_or_die "$1"
+# --- start -------------------------------------------------------------------
 
-    if unit_is_supervised "${UNIT_NAME}"; then
-        log "${UNIT_NAME} is already running."
+start_one() {
+    local name="$1" waited=0 timeout
+
+    if unit_is_supervised "${name}" || unit_is_running "${name}"; then
+        log "${name} is already running."
         return 0
     fi
 
-    mkdir -p "$(unit_state_dir "${UNIT_NAME}")" "${UNIT_LOG_DIR}"
-    rm -f "$(unit_stop_flag "${UNIT_NAME}")"
+    mkdir -p "$(unit_state_dir "${name}")" "${UNIT_LOG_DIR}"
+    rm -f "$(unit_stop_flag "${name}")"
 
     # setsid, so the service is not a child of this SSH session and does not
     # die when you log out.
-    setsid "$0" __supervise "${UNIT_NAME}" >/dev/null 2>&1 &
+    setsid "$0" __supervise "${name}" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 
-    local waited=0
-    while [ "${waited}" -lt 5 ]; do
+    # Waiting for the unit to be up is what makes `systemctl start` usable in a
+    # script: TimeoutStartSec is the unit's own answer to how long that is,
+    # capped here so a unit that sets it to five minutes does not hold a
+    # terminal for five minutes before reporting the obvious.
+    timeout="${U_TIMEOUTSTART}"
+    [ "${timeout}" -gt 15 ] && timeout=15
+    while [ "${waited}" -lt "${timeout}" ]; do
         sleep 1
         waited=$((waited + 1))
-        if unit_is_active "${UNIT_NAME}"; then
-            log "Started ${UNIT_NAME} (pid $(unit_main_pid "${UNIT_NAME}"))."
+        if unit_is_running "${name}"; then
+            log "Started ${name} (pid $(unit_main_pid "${name}"))."
             return 0
         fi
-        unit_is_supervised "${UNIT_NAME}" || break
+        unit_is_supervised "${name}" || break
     done
 
-    if [ "${U_TYPE}" = "oneshot" ]; then
-        log "Ran ${UNIT_NAME} (Type=oneshot)."
+    case "$(unit_result "${name}")" in
+        condition*)
+            log "${name} was not started: ${UNIT_CONDITION_FAILED:-a condition} was not met."
+            return 0
+            ;;
+        active-exited)
+            log "Started ${name} (it exited, RemainAfterExit=yes)."
+            return 0
+            ;;
+        exited)
+            log "Ran ${name}."
+            return 0
+            ;;
+    esac
+
+    if unit_is_supervised "${name}"; then
+        log "Starting ${name} (still coming up)."
         return 0
     fi
 
-    err "${UNIT_NAME} did not stay running. Its log:"
-    tail -n 15 "$(unit_log_file "${UNIT_NAME}")" 2>/dev/null | sed 's/^/  /' >&2
-    exit 1
+    err "${name} did not stay running. Its log:"
+    tail -n 15 "$(unit_log_file "${name}")" 2>/dev/null | sed 's/^/  /' >&2
+    return 1
 }
 
-cmd_stop() {
-    load_unit_or_die "$1"
-    local pid waited=0
+# Requires=/Wants=/BindsTo= are pulled in before the unit itself, and
+# Conflicts= is stopped first, which between them is most of what "systemctl
+# start" does beyond running the command.
+cmd_start() {
+    local requested="$1" dep required=" " deps=() ordered=()
 
-    if ! unit_is_supervised "${UNIT_NAME}" && ! unit_is_active "${UNIT_NAME}"; then
-        log "${UNIT_NAME} is not running."
+    load_unit_or_die "${requested}"
+    local name="${UNIT_NAME}"
+
+    for dep in ${U_CONFLICTS[@]+"${U_CONFLICTS[@]}"}; do
+        dep="$(unit_full_name "${dep}")"
+        if unit_is_active "${dep}"; then
+            log "Stopping ${dep}, which ${name} conflicts with."
+            cmd_stop "${dep}"
+        fi
+    done
+
+    while IFS= read -r dep; do
+        [ -n "${dep}" ] || continue
+        [ "${dep}" = "${name}" ] && continue
+        unit_is_active "${dep}" && continue
+        deps+=("${dep}")
+    done < <(unit_dependencies "${name}" | awk '!seen[$0]++')
+
+    # Requires= is the difference that matters when one of them will not
+    # start: a failed Requires= stops this unit from starting, a failed Wants=
+    # is only noted. Which is which is read from this unit's own [Unit]
+    # section, since what a dependency of a dependency requires is its problem.
+    for dep in ${U_REQUIRES[@]+"${U_REQUIRES[@]}"} ${U_BINDSTO[@]+"${U_BINDSTO[@]}"}; do
+        required="${required}$(unit_full_name "${dep}") "
+    done
+
+    if [ "${#deps[@]}" -gt 0 ]; then
+        while IFS= read -r dep; do
+            [ -n "${dep}" ] && ordered+=("${dep}")
+        done < <(unit_order "${deps[@]}")
+        for dep in ${ordered[@]+"${ordered[@]}"}; do
+            log "Pulling in ${dep}."
+            if ! ( unit_load "${dep}" >/dev/null 2>&1 && start_one "${dep}" ); then
+                case "${required}" in
+                    *" ${dep} "*)
+                        err "${name} requires ${dep}, which did not start."
+                        exit 1
+                        ;;
+                    *) err "${dep} did not start; ${name} only wants it, carrying on." ;;
+                esac
+            fi
+        done
+    fi
+
+    # Requisite= is the one that refuses rather than pulls: if it is not
+    # already up by now, this unit does not start.
+    for dep in ${U_REQUISITE[@]+"${U_REQUISITE[@]}"}; do
+        dep="$(unit_full_name "${dep}")"
+        if ! unit_is_active "${dep}"; then
+            err "${name} has Requisite=${dep}, which is not running."
+            exit 1
+        fi
+    done
+
+    unit_load "${name}" >/dev/null 2>&1
+    start_one "${name}" || exit 1
+    return 0
+}
+
+# --- stop --------------------------------------------------------------------
+
+cmd_stop() {
+    local requested="$1" dependent
+
+    load_unit_or_die "${requested}"
+    local name="${UNIT_NAME}"
+
+    if ! unit_is_supervised "${name}" && ! unit_is_running "${name}"; then
+        # Still worth clearing a recorded failure and the RemainAfterExit
+        # "active (exited)" state, which is what stopping such a unit means.
+        case "$(unit_result "${name}")" in
+            active-exited) unit_run_command_list U_EXECSTOP "$(unit_log_file "${name}")" || true ;;
+        esac
+        unit_set_result "${name}" "stopped"
+        log "${name} is not running."
         return 0
     fi
 
-    # The flag before the signal: the supervisor checks it the moment the
-    # process exits, so setting it afterwards would race with a restart.
-    mkdir -p "$(unit_state_dir "${UNIT_NAME}")"
-    : > "$(unit_stop_flag "${UNIT_NAME}")"
-
-    if [ -n "${U_EXECSTOP}" ]; then
-        unit_run_command "${U_EXECSTOP}" >> "$(unit_log_file "${UNIT_NAME}")" 2>&1 || true
-    fi
-
-    pid="$(unit_main_pid "${UNIT_NAME}")"
-    if [ -n "${pid}" ]; then
-        # The whole process group, not just the main process: systemd stops a
-        # unit's entire cgroup, and a daemon that forked helpers would
-        # otherwise leave them behind, orphaned and still holding its port. The
-        # supervisor runs each service in a process group of its own precisely
-        # so this can be done, and the fallback covers the case where the group
-        # is gone but the process is not.
-        kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
-        while [ "${waited}" -lt "${U_TIMEOUTSTOP}" ] && kill -0 "${pid}" 2>/dev/null; do
-            sleep 1
-            waited=$((waited + 1))
-        done
-        if kill -0 "${pid}" 2>/dev/null; then
-            err "${UNIT_NAME} ignored SIGTERM for ${U_TIMEOUTSTOP}s; killing it."
-            kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+    # BindsTo=/PartOf= point the other way: they name units that must go when
+    # this one does.
+    while IFS= read -r dependent; do
+        [ -n "${dependent}" ] || continue
+        if unit_is_active "${dependent}"; then
+            log "Stopping ${dependent}, which is bound to ${name}."
+            ( unit_load "${dependent}" >/dev/null 2>&1 && unit_stop "${dependent}" ) || true
         fi
-    fi
+    done < <(unit_reverse_deps "${name}")
 
-    pid="$(cat "$(unit_supervisor_pidfile "${UNIT_NAME}")" 2>/dev/null)"
-    if [ -n "${pid}" ]; then
-        kill -TERM "${pid}" 2>/dev/null || true
-    fi
+    unit_load "${name}" >/dev/null 2>&1
+    unit_stop "${name}"
+    log "Stopped ${name}."
+    return 0
+}
 
-    log "Stopped ${UNIT_NAME}."
+cmd_kill() {
+    local name scope="group"
+    load_unit_or_die "$1"
+    name="${UNIT_NAME}"
+    case "${U_KILLMODE}" in process | mixed) scope="process" ;; none) scope="none" ;; esac
+    if ! unit_is_running "${name}"; then
+        err "${name} is not running."
+        exit 1
+    fi
+    unit_signal "$(unit_main_pid "${name}")" "${SIGNAL#SIG}" "${scope}"
+    log "Sent SIG${SIGNAL#SIG} to ${name}."
 }
 
 cmd_reload() {
     load_unit_or_die "$1"
-    if [ -z "${U_EXECRELOAD}" ]; then
+    if [ "${#U_EXECRELOAD[@]}" -eq 0 ]; then
         err "${UNIT_NAME} has no ExecReload; use 'systemctl restart ${UNIT_NAME}'."
         exit 1
     fi
-    unit_run_command "${U_EXECRELOAD}" && log "Reloaded ${UNIT_NAME}."
+    if ! unit_is_active "${UNIT_NAME}"; then
+        err "${UNIT_NAME} is not running."
+        exit 1
+    fi
+    if unit_run_command_list U_EXECRELOAD "$(unit_log_file "${UNIT_NAME}")"; then
+        log "Reloaded ${UNIT_NAME}."
+    else
+        err "Reloading ${UNIT_NAME} failed; see ${UNIT_LOG_DIR}/${UNIT_NAME}.log"
+        exit 1
+    fi
+}
+
+# --- enable ------------------------------------------------------------------
+
+# The [Install] section decides where the link goes: WantedBy= names the
+# targets that want it, RequiredBy= the ones that require it. A unit that says
+# neither goes to multi-user.target, which is where a service that only says
+# "start me at boot" belongs.
+install_links() {
+    local name="$1" target t dir made=0
+
+    for target in ${U_WANTEDBY[@]+"${U_WANTEDBY[@]}"}; do
+        for t in ${target}; do
+            dir="${UNIT_ETC_DIR}/${t}.wants"
+            mkdir -p "${dir}"
+            ln -sfn "${UNIT_FILE}" "${dir}/${name}"
+            log "Created ${dir}/${name} -> ${UNIT_FILE}"
+            made=1
+        done
+    done
+    for target in ${U_REQUIREDBY[@]+"${U_REQUIREDBY[@]}"}; do
+        for t in ${target}; do
+            dir="${UNIT_ETC_DIR}/${t}.requires"
+            mkdir -p "${dir}"
+            ln -sfn "${UNIT_FILE}" "${dir}/${name}"
+            log "Created ${dir}/${name} -> ${UNIT_FILE}"
+            made=1
+        done
+    done
+
+    if [ "${made}" -eq 0 ]; then
+        dir="${UNIT_ETC_DIR}/${UNIT_DEFAULT_TARGET}.wants"
+        mkdir -p "${dir}"
+        ln -sfn "${UNIT_FILE}" "${dir}/${name}"
+        log "Created ${dir}/${name} -> ${UNIT_FILE}"
+    fi
+
+    # Alias= is a second name for the same unit, and Also= enables other units
+    # along with this one - both are how a package ships one command that sets
+    # up several services.
+    for target in ${U_ALIAS[@]+"${U_ALIAS[@]}"}; do
+        for t in ${target}; do
+            ln -sfn "${UNIT_FILE}" "${UNIT_ETC_DIR}/${t}"
+            log "Created alias ${UNIT_ETC_DIR}/${t} -> ${UNIT_FILE}"
+        done
+    done
+    return 0
 }
 
 cmd_enable() {
-    local now="false" name
-    [ "$1" = "--now" ] && { now="true"; shift; }
+    local name also t
+
+    if unit_is_masked "$(unit_full_name "$1")" && [ -z "${FORCE}" ]; then
+        err "Unit $(unit_full_name "$1") is masked; 'systemctl unmask' it first."
+        exit 1
+    fi
     load_unit_or_die "$1"
     name="${UNIT_NAME}"
 
-    mkdir -p "${UNIT_WANTS_DIR}"
-    ln -sfn "${UNIT_FILE}" "${UNIT_WANTS_DIR}/${name}"
-    log "Created ${UNIT_WANTS_DIR}/${name} -> ${UNIT_FILE}"
+    install_links "${name}"
     log "${name} will start when the add-on starts."
-    [ "${now}" = "true" ] && cmd_start "${name}"
+
+    for also in ${U_ALSO[@]+"${U_ALSO[@]}"}; do
+        for t in ${also}; do
+            t="$(unit_full_name "${t}")"
+            [ "${t}" = "${name}" ] && continue
+            unit_is_enabled "${t}" && continue
+            log "Also enabling ${t}."
+            ( cmd_enable "${t}" ) || true
+        done
+    done
+
+    if [ -n "${NOW}" ]; then
+        # A subshell: enable has the unit loaded, and cmd_start loads others.
+        cmd_start "${name}"
+    fi
     return 0
 }
 
 cmd_disable() {
-    local now="false" name
-    [ "$1" = "--now" ] && { now="true"; shift; }
+    local name dir removed=0
     name="$(unit_full_name "$1")"
 
-    if [ -L "${UNIT_WANTS_DIR}/${name}" ]; then
-        rm -f "${UNIT_WANTS_DIR}/${name}"
-        log "Removed ${UNIT_WANTS_DIR}/${name}."
-    else
-        log "${name} was not enabled."
-    fi
-    [ "${now}" = "true" ] && cmd_stop "${name}"
+    for dir in "${UNIT_ETC_DIR}"/*.wants "${UNIT_ETC_DIR}"/*.requires; do
+        if [ -L "${dir}/${name}" ]; then
+            rm -f "${dir}/${name}"
+            log "Removed ${dir}/${name}."
+            removed=1
+        fi
+    done
+    [ "${removed}" -eq 1 ] || log "${name} was not enabled."
+
+    [ -n "${NOW}" ] && cmd_stop "${name}"
     return 0
 }
 
-unit_state_word() {
-    local name="$1"
-    if unit_is_active "${name}"; then printf 'active'
-    elif unit_is_supervised "${name}"; then printf 'activating'
-    else printf 'inactive'; fi
+cmd_mask() {
+    local name
+    name="$(unit_full_name "$1")"
+    mkdir -p "${UNIT_ETC_DIR}"
+    # Masking writes a link to /dev/null where the unit would be looked up
+    # first. When the unit itself lives there - a hand-written one in
+    # /etc/systemd/system - that link would replace the file, and unmasking
+    # would then delete it. systemd refuses this, and so does this.
+    if [ -f "${UNIT_ETC_DIR}/${name}" ] && [ ! -L "${UNIT_ETC_DIR}/${name}" ]; then
+        err "${UNIT_ETC_DIR}/${name} is a unit file, not a link: masking it would delete it."
+        err "Move it to /usr/local/lib/systemd/system if you want to be able to mask it."
+        exit 1
+    fi
+    ln -sfn /dev/null "${UNIT_ETC_DIR}/${name}"
+    log "Created ${UNIT_ETC_DIR}/${name} -> /dev/null"
+    [ -n "${NOW}" ] && cmd_stop "${name}"
+    return 0
 }
 
-cmd_status() {
+cmd_unmask() {
     local name
+    name="$(unit_full_name "$1")"
+    if [ -L "${UNIT_ETC_DIR}/${name}" ] &&
+        [ "$(readlink -f "${UNIT_ETC_DIR}/${name}" 2>/dev/null)" = "/dev/null" ]; then
+        rm -f "${UNIT_ETC_DIR}/${name}"
+        log "Removed ${UNIT_ETC_DIR}/${name}."
+    else
+        log "${name} was not masked."
+    fi
+    return 0
+}
+
+# --- looking at things -------------------------------------------------------
+
+cmd_status() {
+    local name result dropin
+
     if [ -z "${1:-}" ]; then
         cmd_list_units
         return 0
     fi
     load_unit_or_die "$1"
     name="${UNIT_NAME}"
+    result="$(unit_result "${name}")"
 
     printf '%s - %s\n' "${name}" "${U_DESCRIPTION:-no description}"
     printf '   Loaded: %s (%s)\n' "${UNIT_FILE}" \
         "$(unit_is_enabled "${name}" && printf 'enabled' || printf 'disabled')"
+    for dropin in ${U_DROPINS[@]+"${U_DROPINS[@]}"}; do
+        printf '  Drop-In: %s\n' "${dropin}"
+    done
     printf '   Active: %s' "$(unit_state_word "${name}")"
-    if unit_is_active "${name}"; then
+    if unit_is_running "${name}"; then
         printf ' (main pid %s)' "$(unit_main_pid "${name}")"
+    elif [ -n "${result}" ]; then
+        case "${result}" in
+            failed*) printf ' (last exit status %s)' "${result#failed }" ;;
+        esac
     fi
     printf '\n'
     printf '     Type: %s   Restart: %s\n' "${U_TYPE}" "${U_RESTART}"
+    [ -n "${U_DOCUMENTATION}" ] && printf '     Docs: %s\n' "${U_DOCUMENTATION}"
     printf '      Log: %s\n' "$(unit_log_file "${name}")"
 
     if [ -s "$(unit_log_file "${name}")" ]; then
         printf '\n'
         tail -n 12 "$(unit_log_file "${name}")" | sed 's/^/   /'
     fi
+    # systemctl's exit status for an inactive unit is 3, and scripts test it.
+    unit_is_active "${name}" || return 3
+    return 0
+}
+
+# `show` is what installers parse, so the property names are systemd's own.
+cmd_show() {
+    local name pid state props
+
+    load_unit_or_die "$1"
+    name="${UNIT_NAME}"
+    pid="$(unit_main_pid "${name}")"
+    state="$(unit_state_word "${name}")"
+
+    props="$(cat <<EOF
+Id=${name}
+Names=${name}
+Description=${U_DESCRIPTION}
+LoadState=loaded
+ActiveState=${state%% *}
+SubState=$(unit_is_running "${name}" && printf 'running' || printf 'dead')
+UnitFileState=$(unit_is_enabled "${name}" && printf 'enabled' || printf 'disabled')
+FragmentPath=${UNIT_FILE}
+Type=${U_TYPE}
+Restart=${U_RESTART}
+RestartUSec=${U_RESTARTSEC}s
+TimeoutStopUSec=${U_TIMEOUTSTOP}s
+MainPID=${pid:-0}
+ExecMainPID=${pid:-0}
+User=${U_USER:-root}
+WorkingDirectory=${U_WORKDIR}
+PIDFile=${U_PIDFILE}
+NeedDaemonReload=no
+CanStart=yes
+CanStop=yes
+CanReload=$([ "${#U_EXECRELOAD[@]}" -gt 0 ] && printf 'yes' || printf 'no')
+EOF
+)"
+    if [ -n "${SHOW_PROPERTY}" ]; then
+        printf '%s\n' "${props}" | grep -E "^(${SHOW_PROPERTY//,/|})="
+    else
+        printf '%s\n' "${props}"
+    fi
+    return 0
 }
 
 cmd_list_units() {
-    local dir file name seen=" "
-    printf '%-40s %-11s %-9s %s\n' "UNIT" "STATE" "ENABLED" "FILE"
+    local dir file name seen=" " pattern="*.service"
+
+    [ -n "${LIST_TYPE}" ] && pattern="*.${LIST_TYPE}"
+    printf '%-40s %-17s %-9s %s\n' "UNIT" "STATE" "ENABLED" "FILE"
     for dir in "${UNIT_PATHS[@]}"; do
         [ -d "${dir}" ] || continue
-        for file in "${dir}"/*.service; do
+        for file in "${dir}"/${pattern}; do
             [ -e "${file}" ] || continue
             name="${file##*/}"
             case "${seen}" in *" ${name} "*) continue ;; esac
             seen="${seen}${name} "
-            printf '%-40s %-11s %-9s %s\n' "${name}" "$(unit_state_word "${name}")" \
+            # Without --all, the listing is what systemd's is: units that are
+            # doing something, or that were told to.
+            if [ -z "${LIST_ALL}" ] && ! unit_is_active "${name}" &&
+                ! unit_is_failed "${name}" && ! unit_is_enabled "${name}"; then
+                continue
+            fi
+            printf '%-40s %-17s %-9s %s\n' "${name}" "$(unit_state_word "${name}")" \
                 "$(unit_is_enabled "${name}" && printf 'enabled' || printf 'disabled')" "${file}"
         done
     done
 }
 
+cmd_list_dependencies() {
+    local name dep
+    load_unit_or_die "$1"
+    name="${UNIT_NAME}"
+    printf '%s\n' "${name}"
+    while IFS= read -r dep; do
+        [ -n "${dep}" ] || continue
+        printf '  %s %s\n' "$(unit_is_active "${dep}" && printf '*' || printf ' ')" "${dep}"
+    done < <(unit_dependencies "${name}" | awk '!seen[$0]++')
+    return 0
+}
+
+cmd_cat() {
+    local dropin
+    load_unit_or_die "$1"
+    printf '# %s\n' "${UNIT_FILE}"
+    cat "${UNIT_FILE}"
+    for dropin in ${U_DROPINS[@]+"${U_DROPINS[@]}"}; do
+        printf '\n# %s\n' "${dropin}"
+        cat "${dropin}"
+    done
+    return 0
+}
+
+cmd_reset_failed() {
+    local name
+    if [ -z "${1:-}" ]; then
+        for name in "${UNIT_RUN_DIR}"/*; do
+            [ -d "${name}" ] || continue
+            unit_is_failed "${name##*/}" && rm -f "$(unit_result_file "${name##*/}")"
+        done
+        return 0
+    fi
+    name="$(unit_full_name "$1")"
+    rm -f "$(unit_result_file "${name}")"
+    return 0
+}
+
+# --- entry point -------------------------------------------------------------
+
 main() {
-    local command="${1:-}"
-    shift || true
-    # Flags systemctl users pass out of habit; harmless here, and refusing them
-    # would break scripts that call `systemctl --no-pager status`.
-    local args=()
+    local command="" args=() a u expect=""
+
+    # Flags systemctl users and installers pass out of habit, plus the few that
+    # change what happens here. Refusing the rest would break scripts that call
+    # `systemctl --no-pager status`, so the ones with no meaning here are
+    # accepted and dropped rather than rejected. The short forms that take a
+    # value take the next argument, as they do in systemctl.
     for a in "$@"; do
+        if [ -n "${expect}" ]; then
+            case "${expect}" in
+                type) LIST_TYPE="${a}" ;;
+                signal) SIGNAL="${a}" ;;
+                property) SHOW_PROPERTY="${a}" ;;
+            esac
+            expect=""
+            continue
+        fi
         case "${a}" in
-            --no-pager | --no-ask-password | -q | --quiet | --system) ;;
-            *) args+=("${a}") ;;
+            # --version has to be matched here: it looks like a flag, and the
+            # generic "drop what we do not know" case below would swallow it,
+            # leaving the usage text where an installer expects a version.
+            --version) command="--version" ;;
+            --now) NOW=1 ;;
+            -f | --force) FORCE=1 ;;
+            -q | --quiet) QUIET=1 ;;
+            -a | --all) LIST_ALL=1 ;;
+            --type=*) LIST_TYPE="${a#--type=}" ;;
+            -t) expect="type" ;;
+            --signal=*) SIGNAL="${a#--signal=}" ;;
+            -s) expect="signal" ;;
+            --property=*) SHOW_PROPERTY="${a#--property=}" ;;
+            -p) expect="property" ;;
+            --user | --global)
+                err "There is no per-user manager here; everything runs as root."
+                exit 1
+                ;;
+            --no-pager | --no-ask-password | --no-block | --no-legend | --system | -l | --full) ;;
+            -*) ;;
+            *)
+                if [ -z "${command}" ]; then
+                    command="${a}"
+                else
+                    args+=("${a}")
+                fi
+                ;;
         esac
     done
     set -- ${args[@]+"${args[@]}"}
@@ -250,31 +611,54 @@ main() {
     case "${command}" in
         start) [ $# -ge 1 ] || { err "start needs a unit"; exit 2; }; for u in "$@"; do cmd_start "${u}"; done ;;
         stop) [ $# -ge 1 ] || { err "stop needs a unit"; exit 2; }; for u in "$@"; do cmd_stop "${u}"; done ;;
-        restart | try-restart)
+        restart)
             [ $# -ge 1 ] || { err "restart needs a unit"; exit 2; }
             for u in "$@"; do cmd_stop "${u}"; cmd_start "${u}"; done
             ;;
+        try-restart | condrestart)
+            for u in "$@"; do
+                if unit_is_active "$(unit_full_name "${u}")"; then
+                    cmd_stop "${u}"; cmd_start "${u}"
+                fi
+            done
+            ;;
         reload) cmd_reload "${1:-}" ;;
-        reload-or-restart) cmd_reload "${1:-}" 2>/dev/null || { cmd_stop "${1:-}"; cmd_start "${1:-}"; } ;;
-        enable) [ $# -ge 1 ] || { err "enable needs a unit"; exit 2; }; cmd_enable "$@" ;;
-        disable) [ $# -ge 1 ] || { err "disable needs a unit"; exit 2; }; cmd_disable "$@" ;;
+        reload-or-restart | reload-or-try-restart | force-reload)
+            for u in "$@"; do
+                cmd_reload "${u}" 2>/dev/null || { cmd_stop "${u}"; cmd_start "${u}"; }
+            done
+            ;;
+        kill) cmd_kill "${1:-}" ;;
+        enable) [ $# -ge 1 ] || { err "enable needs a unit"; exit 2; }; for u in "$@"; do cmd_enable "${u}"; done ;;
+        disable) [ $# -ge 1 ] || { err "disable needs a unit"; exit 2; }; for u in "$@"; do cmd_disable "${u}"; done ;;
+        reenable)
+            for u in "$@"; do cmd_disable "${u}"; cmd_enable "${u}"; done
+            ;;
+        mask) for u in "$@"; do cmd_mask "${u}"; done ;;
+        unmask) for u in "$@"; do cmd_unmask "${u}"; done ;;
         status) cmd_status "${1:-}" ;;
+        show) cmd_show "${1:-}" ;;
         is-active)
             load_unit_or_die "${1:-}"
             printf '%s\n' "$(unit_state_word "${UNIT_NAME}")"
             unit_is_active "${UNIT_NAME}"
             ;;
+        is-failed)
+            load_unit_or_die "${1:-}"
+            unit_is_failed "${UNIT_NAME}" && { echo failed; exit 0; }
+            printf '%s\n' "$(unit_state_word "${UNIT_NAME}")"
+            exit 1
+            ;;
         is-enabled)
             local name; name="$(unit_full_name "${1:-}")"
+            unit_is_masked "${name}" && { echo masked; exit 1; }
             unit_is_enabled "${name}" && { echo enabled; exit 0; }
             echo disabled; exit 1
             ;;
+        reset-failed) cmd_reset_failed "${1:-}" ;;
         list-units | list-unit-files) cmd_list_units ;;
-        cat)
-            load_unit_or_die "${1:-}"
-            printf '# %s\n' "${UNIT_FILE}"
-            cat "${UNIT_FILE}"
-            ;;
+        list-dependencies) cmd_list_dependencies "${1:-}" ;;
+        cat) cmd_cat "${1:-}" ;;
         --version | version)
             # Installers parse this. kardianos/service - which netbird and
             # others use to install themselves - runs `systemctl --version` and
@@ -284,12 +668,14 @@ main() {
             # what this actually is right after it.
             echo "systemd 245 (addon-units: a replacement, not systemd)"
             ;;
-        daemon-reload | daemon-reexec | preset)
+        daemon-reload | daemon-reexec | preset | preset-all | link)
             # Nothing is cached, so there is nothing to reload. Reported as
             # success because installers - `netbird service install` among
             # them - call it and stop on a non-zero status.
             ;;
-        # Internal: the detached supervisor started by cmd_start.
+        is-system-running) echo running ;;
+        get-default) echo "${UNIT_DEFAULT_TARGET}" ;;
+        # Internal: the detached supervisor started by start_one.
         __supervise)
             load_unit_or_die "${1:-}"
             unit_supervise "${UNIT_NAME}"
