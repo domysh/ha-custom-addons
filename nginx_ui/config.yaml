@@ -1,5 +1,5 @@
 name: "Nginx UI"
-version: "2.6.1"
+version: "2.6.3"
 slug: "nginx_ui"
 description: "Nginx and its web control panel (nginx-ui): sites, streams, TLS certificates and logs, all configured from the panel rather than from add-on options."
 url: "https://github.com/domysh/ha-custom-addons"
