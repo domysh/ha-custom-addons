@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.2
+
+- The packages the Fedora base image ships are now upgraded when the image is
+  built. `dnf install` only ever added packages, so openssl, glibc and the rest
+  of what sshd links against stayed at whatever version the device's cached
+  `fedora:44` happened to have — possibly months behind Fedora's security
+  updates.
+- `ha` CLI updated from 5.3.1 to 5.6.0: adds `ha time`, `ha multicast options`,
+  `ha docker reset-storage` and `ha factory-reset`, and is built with Go 1.26.
+
 ## 1.2.1
 
 - **Only start units that were enabled here.** 1.2.0 widened the boot scan from

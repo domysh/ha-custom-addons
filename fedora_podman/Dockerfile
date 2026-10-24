@@ -46,7 +46,14 @@ FROM ${BUILD_FROM}
 # of each of these per release, and pinning them would make the image
 # un-rebuildable as soon as Fedora pushes a security update. The Fedora
 # release itself is pinned in build.yaml, which is the version that matters.
-RUN dnf install -y --setopt=install_weak_deps=False --nodocs \
+#
+# `dnf upgrade` comes first because `dnf install` never touches what the base
+# image already ships - openssl, glibc and the rest of what sshd links against.
+# The add-on is built on the device, from whatever fedora:44 its Docker pulled
+# last, which can be months old; without the upgrade the security fixes Fedora
+# has published since then would never land in the image.
+RUN dnf upgrade -y --refresh --setopt=install_weak_deps=False --nodocs \
+    && dnf install -y --setopt=install_weak_deps=False --nodocs \
         openssh-server \
         openssh-clients \
         podman \
@@ -96,7 +103,7 @@ RUN dnf install -y --setopt=install_weak_deps=False --nodocs \
 #
 # The add-on is built on the target device, so uname -m is the architecture we
 # are building for; no BUILD_ARCH plumbing needed.
-ARG HA_CLI_VERSION=5.3.1
+ARG HA_CLI_VERSION=5.6.0
 RUN set -eux; \
     case "$(uname -m)" in \
         aarch64) ha_arch="aarch64" ;; \
