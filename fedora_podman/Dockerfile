@@ -49,7 +49,7 @@ FROM ${BUILD_FROM}
 #
 # `dnf upgrade` comes first because `dnf install` never touches what the base
 # image already ships - openssl, glibc and the rest of what sshd links against.
-# The add-on is built on the device, from whatever fedora:44 its Docker pulled
+# The add-on is built on the device, from whatever fedora:45 its Docker pulled
 # last, which can be months old; without the upgrade the security fixes Fedora
 # has published since then would never land in the image.
 RUN dnf upgrade -y --refresh --setopt=install_weak_deps=False --nodocs \

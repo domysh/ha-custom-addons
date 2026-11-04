@@ -9,5 +9,5 @@
 # while the packages installed on top would keep floating anyway. Bump the
 # major version here by hand when you want to move to a new Fedora.
 build_from:
-  aarch64: "docker.io/library/fedora:44"
-  amd64: "docker.io/library/fedora:44"
+  aarch64: "docker.io/library/fedora:45"
+  amd64: "docker.io/library/fedora:45"

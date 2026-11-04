@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.0
+
+- **Fedora 45.** The base image moves from `fedora:44` to `fedora:45`, which
+  brings that release's Podman, crun and netavark.
+
+  This resets the persistent system layer: on the first start after the
+  update the add-on sees the Fedora version change and moves the old layer
+  aside to `/config/system.fedora-44.<timestamp>`, since files kept from 44
+  would shadow the libraries 45 updated. Packages you installed with `dnf` are
+  not carried over — reinstall them, then delete the retired directory. Your
+  containers, images and volumes are not part of that layer and are kept.
+
 ## 1.2.2
 
 - The packages the Fedora base image ships are now upgraded when the image is

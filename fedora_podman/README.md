@@ -24,7 +24,8 @@ appear in the store at all).
   shell — with all the danger that implies.
 - The `ha` CLI, for driving Home Assistant itself from the same shell.
 - The Fedora system itself is persistent, so `dnf install` survives add-on
-  updates and resets only when you delete its directory.
+  updates. It resets when you delete its directory, and when the add-on
+  moves to a new Fedora release.
 - Containers that were running when the add-on stopped come back when it
   starts, whatever restart policy they carry.
 - Services from their own systemd unit files, without systemd: `dnf install`

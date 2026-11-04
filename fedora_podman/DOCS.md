@@ -673,7 +673,7 @@ the add-on's namespace.
 `mount --bind /proc/1/root /host` does not do that. `mount(8)` canonicalises
 its source in userspace first — it reads the link, gets `/`, and binds the
 add-on's *own* root onto `/host`. The result looks plausible and is completely
-wrong: `/host/etc/os-release` says `Fedora Linux 44 (Container Image)` and
+wrong: `/host/etc/os-release` says `Fedora Linux 45 (Container Image)` and
 `/host/mnt` is empty. `--no-canonicalize` does not rescue it either; the kernel
 rejects a `/proc/<pid>/root` source for a bind. And even a bind that did take
 would only copy the one mount, never the submounts underneath it — those live
