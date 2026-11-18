@@ -1,4 +1,4 @@
-FROM uozi/nginx-ui:3.0.4
+FROM uozi/nginx-ui:3.0.5
 LABEL io.hass.type="addon"
 
 # The base image is Debian (it is built on nginx:latest), so this is apt, not
