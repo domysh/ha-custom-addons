@@ -33,6 +33,14 @@
 #  2. `systemctl enable` is recorded, so the add-on can tell a unit you chose
 #     apart from one the base image arrived with enabled. See
 #     /usr/local/lib/addon-boot-units.sh for what the add-on starts at boot.
+#  3. Upstream assumes it is the container's init. Here PID 1 is the host's
+#     systemd (host_pid), so the commands that act on "the system" are
+#     refused: `halt` ends with kill(1, SIGQUIT), which here would signal
+#     Home Assistant OS's init; `default` and a bare `init` start everything
+#     enabled, the image's own plumbing included; and the `__*` commands are
+#     upstream's internal test hooks (`__killall` signals processes by name
+#     across the whole /proc - the host's, here). The add-on's own boot uses
+#     `--init start UNITS`, which none of this touches.
 #
 # Everything else is passed through untouched, by exec, so exit codes and
 # output are upstream's own.
@@ -65,6 +73,7 @@ option_takes_value() {
 
 COMMAND=""
 NOW=""
+INIT=""
 UNITS=()
 
 parse_args() {
@@ -78,6 +87,7 @@ parse_args() {
             case "${arg}" in
                 --) options_done=1; continue ;;
                 --now) NOW=1; continue ;;
+                --init | -1) INIT=1; continue ;;
                 --*=*) continue ;;
                 -*)
                     option_takes_value "${arg}" && skip=1
@@ -195,9 +205,34 @@ forget_optin() {
     return 0
 }
 
+refuse_system_command() {
+    printf 'systemctl: %s is not available in this add-on: %s\n' "$1" "$2" >&2
+    exit 1
+}
+
+guard_system_commands() {
+    case "${COMMAND}" in
+        halt)
+            refuse_system_command halt \
+                "it signals PID 1, which here is Home Assistant OS's own init." ;;
+        default)
+            refuse_system_command default \
+                "it would start every enabled unit, the base image's included." ;;
+        init | "")
+            # `--init` with no command is upstream's `default` too.
+            [ "${COMMAND}" = init ] || [ -n "${INIT}" ] || return 0
+            [ "${#UNITS[@]}" -gt 0 ] || refuse_system_command "init without units" \
+                "it would start every enabled unit, the base image's included." ;;
+        __*)
+            refuse_system_command "${COMMAND}" \
+                "it is an internal command of systemctl3.py, not meant for use here." ;;
+    esac
+}
+
 main() {
     local rc
     parse_args "$@"
+    guard_system_commands
     guard_sshd
 
     case "${COMMAND}" in

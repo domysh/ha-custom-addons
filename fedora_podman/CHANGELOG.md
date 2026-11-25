@@ -38,6 +38,9 @@
     `--no-pager`; `--list-units` and `-r` are gone. The old runner's log
     directory under `/var/log` is left where it was; delete it when you no
     longer need it.
+  - `systemctl halt`, `default`, `init` without units and upstream's
+    internal `__*` commands are refused: they assume the replacement is
+    PID 1, and here PID 1 is the host's systemd (`halt` would signal it).
   - Unit environment, `User=` and directory handling are upstream's; see the
     *Services* section of the documentation for what is supported.
 

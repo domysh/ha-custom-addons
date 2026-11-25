@@ -183,7 +183,11 @@ select_boot_units() {
         fi
         # A link can outlive its unit (the package was removed) or disagree
         # with the unit's [Install] section; upstream decides, and says why.
-        state="$("${ADDON_SYSTEMCTL}" is-enabled "${name}" 2>/dev/null | head -n1)"
+        # `|| true`: is-enabled exits non-zero for anything but enabled, and
+        # under the entrypoint's errexit that would end the selection silently
+        # at the first such unit. Its output is still wanted, for the warning.
+        state="$("${ADDON_SYSTEMCTL}" is-enabled "${name}" 2>/dev/null)" || true
+        state="${state%%$'\n'*}"
         if [ "${state}" = "enabled" ]; then
             printf '%s\n' "${name}"
         else

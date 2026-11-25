@@ -430,6 +430,12 @@ systemctl cat UNIT
 systemctl daemon-reload              # accepted; nothing is cached to reload
 ```
 
+A few of upstream's commands assume it is the container's init, which here it
+is not — PID 1 is Home Assistant OS's systemd — so the add-on refuses them:
+`halt` (it signals PID 1), `default` and `init` without units (they start
+every enabled unit, the image's own plumbing included), and the internal
+`__*` commands.
+
 `systemctl help` lists everything upstream implements, and its
 [documentation][dsr] is the reference for what each one does. In short, from
 its source: `Type=simple`, `exec`, `idle`, `forking`, `notify` and `oneshot`;
