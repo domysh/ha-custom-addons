@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.1.0
+
+- **`dnf upgrade netbird` now actually restarts netbird.** It used to leave the
+  old daemon running. rpm runs scriptlets with
+  `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, so the add-on's `systemctl` in
+  `/usr/local/bin` was never what a scriptlet reached: netbird's upgrade
+  `%post` did `systemctl stop netbird` against nothing that worked, then
+  `netbird service start` found the old process still up and did nothing.
+- **The service manager is now
+  [docker-systemctl-replacement](https://github.com/gdraheim/docker-systemctl-replacement)**
+  1.7.1097 by Guido U. Draheim (EUPL-1.2), at `/usr/bin/systemctl` and
+  `/usr/bin/journalctl`, replacing the add-on's own bash implementation. It is
+  downloaded at build time, pinned and checked against a hash, and runs on
+  `python3`, which is now a protected package. systemd's real binaries, which
+  the image has as a dependency, are moved to `/usr/lib/addon-systemctl/systemd/`.
+- rpm no longer writes `/usr/bin/systemctl` or `/usr/bin/journalctl` when the
+  systemd package is installed, upgraded or removed (`%_netsharedpath`, in
+  `/etc/rpm/macros.addon-systemctl`). On an install whose persistent `/usr`
+  already has systemd's binary there from an earlier upgrade, the add-on puts
+  the replacement back at start and says so in the log.
+- **Kept from before:** `sshd.service` (and `sshd.socket`, `sshd@*`) is still
+  never started — `start`, `restart` and `enable --now` are refused with a
+  message, the units are masked in the image, and the boot skips them. The boot
+  still starts only units enabled since the image was built (plus any you
+  `systemctl enable` explicitly; enables recorded by 2.0.0 still count), and
+  their output still reaches the add-on log, tagged with the unit name.
+- **Different from before**, because upstream works differently:
+  - `Restart=` is applied by upstream's init loop, which the add-on runs for
+    the units it starts at boot. A unit you start by hand over SSH is not
+    restarted if it dies, until the next add-on start (and then only if
+    enabled). Five restarts within ten seconds stop the retries until
+    `systemctl reset-failed`.
+  - `Requires=`/`Wants=` no longer start other units; `After=` still orders.
+  - Logs are now in `/var/log/journal/<unit file>.log`, rotated at 5 MB when
+    the add-on starts. `journalctl` supports `-u`, `-n`, `-f` and
+    `--no-pager`; `--list-units` and `-r` are gone. The old runner's log
+    directory under `/var/log` is left where it was; delete it when you no
+    longer need it.
+  - Unit environment, `User=` and directory handling are upstream's; see the
+    *Services* section of the documentation for what is supported.
+
 ## 2.0.0
 
 - **Fedora 45.** The base image moves from `fedora:44` to `fedora:45`, which

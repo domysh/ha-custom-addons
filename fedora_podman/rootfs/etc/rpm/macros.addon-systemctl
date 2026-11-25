@@ -1,0 +1,32 @@
+# Keeps the add-on's service manager at /usr/bin/systemctl and
+# /usr/bin/journalctl when the systemd package is installed or upgraded.
+#
+# Those two paths are symlinks to /usr/lib/addon-systemctl/ (see the wrapper
+# there for why they have to be at /usr/bin: rpm runs scriptlets with
+# PATH=/sbin:/bin:/usr/sbin:/usr/bin). The systemd package ships its own files
+# at the same paths, and its real systemctl cannot work in this add-on - it
+# only ever answers "System has not been booted with systemd". Every
+# `dnf upgrade` that touched systemd used to put it back, and the next
+# package scriptlet that ran `systemctl stop` silently did nothing.
+#
+# %_netsharedpath is rpm's list (colon-separated) of paths it treats as shared
+# from elsewhere: a packaged file at or under one of them is not written on
+# install or upgrade and not removed on erase, and rpm records it as
+# "net shared" instead. Full file paths are accepted, not only directories.
+# It is applied inside the transaction, as each package's files are laid
+# down - so by the time any later package's %post runs, even in the same
+# `dnf install` that pulled systemd in, /usr/bin/systemctl is still ours.
+#
+# Rejected alternatives:
+#  - a dnf5 post-transaction action that restores the links: runs after the
+#    whole transaction, which is too late for the %post scriptlets of the other
+#    packages in it - exactly when netbird's upgrade needs a working systemctl.
+#  - a bind mount over /usr/bin/systemctl: rpm replaces a file by writing a
+#    temporary one and rename()ing it over the old path, which fails with
+#    EBUSY on a mount point and aborts the transaction.
+#  - excludepkgs=systemd: plenty of packages require systemd for their
+#    scriptlets, and they would then not install at all.
+#
+# On /etc, which is a persistent overlay too: what applies is this file from
+# the image, unless you edit it, in which case your copy wins for ever.
+%_netsharedpath /usr/bin/systemctl:/usr/bin/journalctl

@@ -30,9 +30,11 @@ appear in the store at all).
   starts, whatever restart policy they carry.
 - Services from their own systemd unit files, without systemd: `dnf install`
   a package, `systemctl enable --now` it, and it runs and comes back after a
-  restart. Drop-ins, `Environment=`, `RuntimeDirectory=`, `Restart=`,
-  conditions, dependencies and `Type=forking` behave as the unit file says;
-  `journalctl -u` reads the logs.
+  restart. `systemctl` is
+  [docker-systemctl-replacement](https://github.com/gdraheim/docker-systemctl-replacement)
+  (EUPL-1.2) at `/usr/bin/systemctl`, so package scriptlets reach it too and
+  `dnf upgrade` really restarts what it upgrades; `journalctl -u` reads the
+  logs.
 
 ## Quick start
 
@@ -71,9 +73,14 @@ rootfs/
   usr/local/bin/inspect-runtime.sh     what the Supervisor actually granted
   usr/local/bin/podman-diag            read-only state dump for debugging
   usr/local/bin/addon-reset            queue a reset of storage / system layer
-  usr/local/lib/addon-units.sh         reads and runs systemd unit files
-  usr/local/bin/systemctl              the systemd replacement built on it
-  usr/local/bin/journalctl             reads what those units logged
+  usr/local/lib/addon-boot-units.sh    which units start at boot, their logs
+                                       in the add-on log, /usr/bin/systemctl
+                                       kept in place
+  usr/lib/addon-systemctl/systemctl    wrapper in front of upstream's
+                                       systemctl3.py (fetched at build time):
+                                       refuses sshd, records `enable`
+  usr/lib/addon-systemctl/journalctl   wrapper for upstream's journalctl3.py
+  etc/rpm/macros.addon-systemctl       keeps rpm from overwriting the two
 DOCS.md         user-facing documentation (shown in the add-on UI)
 CHANGELOG.md    version history
 ```

@@ -39,8 +39,15 @@ FROM ${BUILD_FROM}
 #       come up with a broken UTF-8 setup.
 #   util-linux-core
 #       provides nsenter, used to get a real shell in the host's namespaces
-#       (see the host access section of DOCS.md), and setpriv, which runs a
-#       unit's ExecStart as its User= when it asks for one.
+#       (see the host access section of DOCS.md).
+#   python3
+#       what the service manager is written in (docker-systemctl-replacement,
+#       fetched below). podman-compose pulls it in already; it is listed
+#       because /usr/bin/systemctl depends on it directly, and an unlisted
+#       dependency is one a later cleanup removes. For the same reason it is
+#       a dnf protected package (/etc/dnf/protected.d/addon-systemctl.conf):
+#       `dnf remove python3` would otherwise take every package scriptlet's
+#       systemctl with it.
 #
 # Package versions are intentionally not pinned: Fedora only ships one version
 # of each of these per release, and pinning them would make the image
@@ -89,6 +96,7 @@ RUN dnf upgrade -y --refresh --setopt=install_weak_deps=False --nodocs \
         vim-minimal \
         htop \
         bash-completion \
+        python3 \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -115,28 +123,86 @@ RUN set -eux; \
     chmod 0755 /usr/bin/ha; \
     /usr/bin/ha --help >/dev/null
 
+# The service manager: docker-systemctl-replacement by Guido U. Draheim
+# (https://github.com/gdraheim/docker-systemctl-replacement, EUPL-1.2), a
+# systemctl that reads unit files and runs them without systemd - which cannot
+# run here at all, see /usr/lib/addon-systemctl/systemctl.
+#
+# It replaces a service manager this add-on used to carry itself, a ~2,400-line
+# bash reimplementation in /usr/local/bin. That one worked from a shell, but
+# not from rpm: scriptlets run with PATH=/sbin:/bin:/usr/sbin:/usr/bin, never
+# saw /usr/local/bin, and so `dnf upgrade netbird` left the old netbird
+# running. Moving it to /usr/bin would have fixed that one thing; upstream is
+# a maintained, tested implementation of what was being reimplemented, so the
+# move was to it instead.
+#
+# Pinned to a tag and checked against a hash, like the ha CLI above and for
+# the same reason, and additionally because it is executed as root by every
+# package scriptlet: a changed file has to fail the build, not install. Bump
+# the tag and both hashes together, deliberately.
+ARG DSR_VERSION=v1.7.1097
+ARG DSR_SYSTEMCTL_SHA256=5f5a47f321c7a8881dfd01f774106dc4012d664bee238eada86a7112674fea93
+ARG DSR_JOURNALCTL_SHA256=16a52fe484d7c0fca464c82a56de58980440362942482c0d1fbc424e69f8f833
+RUN set -eux; \
+    base="https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement/${DSR_VERSION}/files/docker"; \
+    mkdir -p /usr/lib/addon-systemctl; \
+    cd /usr/lib/addon-systemctl; \
+    curl -fsSL -o systemctl3.py "${base}/systemctl3.py"; \
+    curl -fsSL -o journalctl3.py "${base}/journalctl3.py"; \
+    printf '%s  %s\n' \
+        "${DSR_SYSTEMCTL_SHA256}" systemctl3.py \
+        "${DSR_JOURNALCTL_SHA256}" journalctl3.py \
+        | sha256sum -c -; \
+    chmod 0755 systemctl3.py journalctl3.py; \
+    python3 systemctl3.py --version >/dev/null
+
 COPY rootfs /
 
 # The entrypoint and the user-facing commands are executed; the configure-*.sh
-# files and the unit library are sourced by them. The systemctl and journalctl
-# here are not systemd's - neither systemd nor journald can run in this add-on
-# at all, see addon-units.sh - but replacements that read the unit files
-# packages install and the logs those units write. /usr/local/bin precedes
-# /usr/bin in PATH, so they answer even when a package pulls the real systemd
-# in for its scriptlets; they deliberately do not hand over to it, because it
-# could only refuse.
-RUN chmod 0755 \
+# files and the boot-units helper are sourced by them. systemctl3.py has to be
+# executable as well as the wrappers: journalctl3.py runs it directly.
+#
+# /usr/bin/systemctl and /usr/bin/journalctl become symlinks to the wrappers.
+# systemd is in this image (the package set above pulls it in as a
+# dependency), so its real binaries are at those paths now - the check below
+# is for a base where it is not. They are moved aside rather than deleted,
+# for whoever wants systemd's own offline `systemctl --root=...`, and rpm is
+# told not to put them back (/etc/rpm/macros.addon-systemctl). The entrypoint
+# re-checks the links on every start, for installs whose persistent /usr
+# already has systemd's file in it.
+#
+# sshd.service and sshd.socket are masked: this add-on is an sshd, and a
+# second one would take its port and lock you out. The wrapper refuses
+# `systemctl start sshd` by name; the mask is what stops it being started
+# along with a target (`systemctl start multi-user.target`, `default`), since
+# upstream skips masked units however they are reached.
+RUN set -eux; \
+    chmod 0755 \
         /usr/local/bin/entrypoint.sh \
         /usr/local/bin/podman-diag \
         /usr/local/bin/addon-reset \
-        /usr/local/bin/systemctl \
-        /usr/local/bin/journalctl \
-    && chmod 0644 \
+        /usr/lib/addon-systemctl/systemctl \
+        /usr/lib/addon-systemctl/journalctl; \
+    chmod 0644 \
         /usr/local/bin/configure-podman.sh \
         /usr/local/bin/configure-ssh.sh \
         /usr/local/bin/configure-persistence.sh \
         /usr/local/bin/inspect-runtime.sh \
-        /usr/local/lib/addon-units.sh
+        /usr/local/lib/addon-boot-units.sh \
+        /etc/rpm/macros.addon-systemctl \
+        /etc/dnf/protected.d/addon-systemctl.conf; \
+    for name in systemctl journalctl; do \
+        if [ -e "/usr/bin/${name}" ] && [ ! -L "/usr/bin/${name}" ]; then \
+            mkdir -p /usr/lib/addon-systemctl/systemd; \
+            mv "/usr/bin/${name}" "/usr/lib/addon-systemctl/systemd/${name}"; \
+        fi; \
+        ln -sfn "/usr/lib/addon-systemctl/${name}" "/usr/bin/${name}"; \
+    done; \
+    mkdir -p /etc/systemd/system; \
+    ln -sfn /dev/null /etc/systemd/system/sshd.service; \
+    ln -sfn /dev/null /etc/systemd/system/sshd.socket; \
+    env -i PATH=/usr/sbin:/usr/bin systemctl --version; \
+    [ "$(env -i PATH=/usr/sbin:/usr/bin systemctl is-enabled sshd.service)" = masked ]
 
 # Record which units this image arrived with enabled, so the add-on can tell
 # them apart from the ones you enable later - the first set is systemd's own
@@ -144,7 +210,7 @@ RUN chmod 0755 \
 # sshd.service, which the packages' presets linked while the image was being
 # built and which nothing here should run. It has to be the last step: every
 # dnf above may have enabled something.
-RUN bash -c 'source /usr/local/lib/addon-units.sh && unit_write_baseline'
+RUN bash -c 'source /usr/local/lib/addon-boot-units.sh && boot_units_write_baseline'
 
 LABEL io.hass.type="addon"
 

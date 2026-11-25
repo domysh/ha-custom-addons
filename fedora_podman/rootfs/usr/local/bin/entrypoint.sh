@@ -19,8 +19,8 @@ source /usr/local/bin/configure-ssh.sh
 source /usr/local/bin/configure-podman.sh
 # shellcheck source=./configure-persistence.sh
 source /usr/local/bin/configure-persistence.sh
-# shellcheck source=../lib/addon-units.sh
-source /usr/local/lib/addon-units.sh
+# shellcheck source=../lib/addon-boot-units.sh
+source /usr/local/lib/addon-boot-units.sh
 # shellcheck source=./inspect-runtime.sh
 source /usr/local/bin/inspect-runtime.sh
 
@@ -345,7 +345,8 @@ write_motd() {
    addon-reset --help     wipe the podman storage, the persistent system
                           layer or the host keys, at the next start
    systemctl              services from their own unit files: enable,
-                          start, status, logs - a stand-in for systemd,
+                          start, status; journalctl -u for their logs.
+                          docker-systemctl-replacement, not systemd,
                           which cannot run here (see DOCS.md)
 
    Anything outside the persistent paths above is lost when this add-on is
@@ -490,6 +491,10 @@ main() {
     # Must come first: everything below writes to /etc, and those writes have
     # to land in the persistent upper layer rather than under it.
     setup_persistent_system "${PERSIST_DIR}/system"
+    # Straight after: the persistent /usr may hold systemd's own systemctl over
+    # the image's, and nothing below - least of all a unit - should run before
+    # /usr/bin/systemctl is the one that works here.
+    ensure_service_manager
 
     configure_timezone
 
@@ -510,9 +515,10 @@ main() {
     { sleep 60; track_running_containers; } &
 
     # Same reasoning as start_containers: a unit that fails or hangs must not
-    # cost you the shell you need to fix it. Each one gets its own supervising
-    # background process.
-    unit_start_enabled
+    # cost you the shell you need to fix it. The units are started by
+    # systemctl's own init loop, in the background, which also applies their
+    # Restart= policies; see addon-boot-units.sh.
+    start_boot_units
 
     log "SSH is listening on port ${SSH_PORT} (public-key authentication only)"
     # exec: sshd becomes the process the Supervisor watches, so stopping the

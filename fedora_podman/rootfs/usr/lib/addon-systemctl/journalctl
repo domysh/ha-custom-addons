@@ -1,0 +1,39 @@
+#!/bin/bash
+# /usr/bin/journalctl in this add-on: hands over to docker-systemctl-
+# replacement's journalctl3.py (EUPL-1.2), which shows the per-unit log files
+# that systemctl3.py writes under /var/log/journal/<unit file>.log.
+#
+# There is no journald here, for the same reason there is no systemd (see
+# /usr/lib/addon-systemctl/systemctl). What is supported is what upstream
+# supports: -u UNIT, -f, -n N, --no-pager. No -b, no --since, no priorities:
+# the logs are plain text files, so grep and less work on them directly.
+#
+# Why a wrapper and not a symlink to journalctl3.py: upstream finds
+# systemctl3.py next to sys.argv[0], which through a symlink at /usr/bin would
+# be /usr/bin/systemctl3.py - a file that does not exist. Running it by its
+# real path keeps that lookup pointing at /usr/lib/addon-systemctl/.
+set -uo pipefail
+
+: "${ADDON_SYSTEMCTL_PYTHON:=/usr/bin/python3}"
+: "${ADDON_JOURNALCTL_PY:=/usr/lib/addon-systemctl/journalctl3.py}"
+
+# systemd's own scriptlets run `journalctl --update-catalog` on install and
+# upgrade. There is no catalog to update, and upstream would fail on the
+# missing -u, so it is answered as the no-op it is.
+case " $* " in
+    *" --update-catalog "*) exit 0 ;;
+esac
+
+if [ "$#" -eq 0 ]; then
+    printf '%s\n' \
+        "journalctl: there is no journal here, only one log file per unit." \
+        "Use 'journalctl -u UNIT [-n N] [-f]', or read /var/log/journal/ directly." >&2
+    exit 1
+fi
+
+# Upstream v1.7.1097 logs which tail it found at CRITICAL level whenever -n is
+# given - a leftover debug line, printed before every log excerpt. Only that
+# line is dropped; anything else on stderr still comes through. stdout is left
+# alone, so -f streams as it should.
+exec "${ADDON_SYSTEMCTL_PYTHON}" "${ADDON_JOURNALCTL_PY}" "$@" \
+    2> >(grep -v --line-buffered '^CRITICAL:systemctl:\[.*tail.*\] => ' >&2)

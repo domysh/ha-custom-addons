@@ -1,0 +1,223 @@
+#!/bin/bash
+# /usr/bin/systemctl in this add-on: a thin guard in front of
+# docker-systemctl-replacement (gdraheim/docker-systemctl-replacement,
+# systemctl3.py, EUPL-1.2), which is what actually reads and runs the units.
+#
+# Why a replacement at all: systemd refuses to run unless it is PID 1, and this
+# add-on shares the host's PID namespace (host_pid, for /host and nsenter), so
+# PID 1 in here is Home Assistant OS's own systemd and nothing of ours can take
+# its place. The real systemctl can only print "System has not been booted
+# with systemd" - see /usr/lib/addon-systemctl/systemd/ for it, kept aside.
+#
+# Why at /usr/bin and not /usr/local/bin, where the add-on's own shim used to
+# live: rpm runs scriptlets with a fixed PATH=/sbin:/bin:/usr/sbin:/usr/bin, so
+# a package's %post never saw /usr/local/bin. netbird's upgrade scriptlet does
+# `systemctl stop netbird` and then `netbird service start`; with nothing
+# working at /usr/bin/systemctl the stop never happened, the start found the
+# old daemon still running and did nothing, and the upgrade left the OLD
+# netbird running. /usr/bin/systemctl is a symlink to this file, kept there by
+# an rpm macro (/etc/rpm/macros.addon-systemctl) and re-checked by the
+# entrypoint on every start.
+#
+# Why a wrapper rather than linking systemctl3.py there directly: two things
+# upstream does not know about this add-on.
+#
+#  1. This add-on IS an sshd - it is how you get in. Fedora's sshd.service is
+#     enabled by openssh-server's preset, and if it ever runs it takes the port
+#     (or races the add-on's own sshd for it) and the add-on dies with "Address
+#     already in use", leaving no way in to undo it. So anything that would
+#     start it is refused here, with a message instead of a lockout. The unit
+#     is also masked in the image, which is what stops the paths this cannot
+#     see by name - `start multi-user.target`, `default`, `isolate` -
+#     because upstream skips masked units however they are reached.
+#  2. `systemctl enable` is recorded, so the add-on can tell a unit you chose
+#     apart from one the base image arrived with enabled. See
+#     /usr/local/lib/addon-boot-units.sh for what the add-on starts at boot.
+#
+# Everything else is passed through untouched, by exec, so exit codes and
+# output are upstream's own.
+set -uo pipefail
+
+# Overridable only so this can be exercised outside the container; nothing
+# sets them in the add-on.
+: "${ADDON_SYSTEMCTL_PYTHON:=/usr/bin/python3}"
+: "${ADDON_SYSTEMCTL_PY:=/usr/lib/addon-systemctl/systemctl3.py}"
+: "${ADDON_SYSTEMCTL_OPTIN_FILE:=/etc/addon-systemctl/enabled}"
+
+upstream() {
+    "${ADDON_SYSTEMCTL_PYTHON}" "${ADDON_SYSTEMCTL_PY}" "$@"
+}
+
+# The command is the first argument that is not an option, as upstream's
+# optparse sees it. Options that take a separate value have to be known, or
+# `--root /x start sshd` would read "/x" as the command; the list is
+# systemctl3.py's own (its main()), not systemd's.
+option_takes_value() {
+    case "$1" in
+        --root | -t | --type | --state | -p | --property | --what | -n | --lines \
+            | -o | --output | -s | --signal | --kill-who | --job-mode \
+            | --preset-mode | --maxtimeout | -c | --config | -e | --extra-vars \
+            | --environment)
+            return 0 ;;
+    esac
+    return 1
+}
+
+COMMAND=""
+NOW=""
+UNITS=()
+
+parse_args() {
+    local arg skip="" options_done=""
+    for arg in "$@"; do
+        if [ -n "${skip}" ]; then
+            skip=""
+            continue
+        fi
+        if [ -z "${options_done}" ]; then
+            case "${arg}" in
+                --) options_done=1; continue ;;
+                --now) NOW=1; continue ;;
+                --*=*) continue ;;
+                -*)
+                    option_takes_value "${arg}" && skip=1
+                    continue
+                    ;;
+            esac
+        fi
+        if [ -z "${COMMAND}" ]; then
+            COMMAND="${arg}"
+        else
+            UNITS+=("${arg}")
+        fi
+    done
+}
+
+# The names that are the add-on's own sshd under another manager. Matched both
+# ways round: `sshd` means sshd.service, as in systemctl, and an argument may
+# be a glob (upstream matches unit names with fnmatch), so `ssh*` counts too.
+PROTECTED_UNITS=(sshd.service sshd.socket sshd@x.service ssh.service ssh.socket)
+
+is_protected() {
+    local arg="$1" candidate name
+    for candidate in "${arg}" "${arg}.service"; do
+        case "${candidate}" in
+            sshd.service | sshd.socket | sshd@*.service | ssh.service | ssh.socket)
+                return 0 ;;
+        esac
+    done
+    case "${arg}" in
+        *[\*\?\[]*)
+            for name in "${PROTECTED_UNITS[@]}"; do
+                # Unquoted on purpose: the argument is the pattern.
+                # shellcheck disable=SC2053
+                [[ ${name} == ${arg} || ${name} == ${arg}.service ]] && return 0
+            done
+            ;;
+    esac
+    return 1
+}
+
+refuse_sshd() {
+    cat >&2 <<EOF
+systemctl: refusing to $1 $2.
+
+This add-on is itself an sshd, and it is the way in. A second sshd here would
+take the port (or race the add-on's own for it), the add-on would then fail
+with "Address already in use", and there would be no shell left to undo it.
+
+To change the port the add-on listens on, use its 'ssh_port' option.
+EOF
+    exit 1
+}
+
+# What a package's scriptlets do to sshd.service on install, upgrade and
+# removal (try-restart, stop, reload). None of it can apply - the add-on's sshd
+# is not this unit - and failing would only make dnf print scriptlet errors, so
+# it is a successful no-op.
+ignore_sshd() {
+    printf 'systemctl: not %s %s: the add-on runs its own sshd, which is not a unit.\n' \
+        "$1" "$2" >&2
+    exit 0
+}
+
+guard_sshd() {
+    local unit
+    for unit in ${UNITS[@]+"${UNITS[@]}"}; do
+        is_protected "${unit}" || continue
+        case "${COMMAND}" in
+            start | restart | reload-or-restart | force-reload | unmask \
+                | __start_unit | __restart_unit | __reload_or_restart_unit \
+                | __test_start_unit | __unmask_unit)
+                refuse_sshd "${COMMAND}" "${unit}" ;;
+            enable | reenable)
+                [ -z "${NOW}" ] || refuse_sshd "${COMMAND} --now" "${unit}" ;;
+            try-restart | reload-or-try-restart | condrestart | stop | kill | reload \
+                | __try_restart_unit | __reload_or_try_restart_unit | __stop_unit \
+                | __kill_unit | __reload_unit)
+                ignore_sshd "${COMMAND}" "${unit}" ;;
+        esac
+    done
+}
+
+# A unit name as it would be recorded: the implicit .service added, globs
+# skipped (recording a pattern would make it match things nobody enabled).
+record_name() {
+    case "$1" in
+        *[\*\?\[]*) return 1 ;;
+        *.service | *.socket | *.target | *.timer | *.path | *.mount) printf '%s\n' "$1" ;;
+        *) printf '%s.service\n' "$1" ;;
+    esac
+}
+
+record_optin() {
+    local unit name
+    mkdir -p "${ADDON_SYSTEMCTL_OPTIN_FILE%/*}" 2>/dev/null || return 0
+    for unit in "$@"; do
+        name="$(record_name "${unit}")" || continue
+        grep -Fxq -- "${name}" "${ADDON_SYSTEMCTL_OPTIN_FILE}" 2>/dev/null && continue
+        printf '%s\n' "${name}" >> "${ADDON_SYSTEMCTL_OPTIN_FILE}" 2>/dev/null || true
+    done
+    return 0
+}
+
+forget_optin() {
+    local unit name tmp
+    [ -f "${ADDON_SYSTEMCTL_OPTIN_FILE}" ] || return 0
+    tmp="${ADDON_SYSTEMCTL_OPTIN_FILE}.tmp.$$"
+    cp -- "${ADDON_SYSTEMCTL_OPTIN_FILE}" "${tmp}" 2>/dev/null || return 0
+    for unit in "$@"; do
+        name="$(record_name "${unit}")" || continue
+        grep -Fxv -- "${name}" "${tmp}" > "${tmp}.next" 2>/dev/null
+        mv -f -- "${tmp}.next" "${tmp}"
+    done
+    mv -f -- "${tmp}" "${ADDON_SYSTEMCTL_OPTIN_FILE}" 2>/dev/null || rm -f -- "${tmp}"
+    return 0
+}
+
+main() {
+    local rc
+    parse_args "$@"
+    guard_sshd
+
+    case "${COMMAND}" in
+        enable)
+            # Not exec'd: the record is written only once upstream has
+            # actually linked the unit.
+            upstream "$@"
+            rc=$?
+            [ "${rc}" -ne 0 ] || record_optin ${UNITS[@]+"${UNITS[@]}"}
+            exit "${rc}"
+            ;;
+        disable)
+            upstream "$@"
+            rc=$?
+            [ "${rc}" -ne 0 ] || forget_optin ${UNITS[@]+"${UNITS[@]}"}
+            exit "${rc}"
+            ;;
+    esac
+
+    exec "${ADDON_SYSTEMCTL_PYTHON}" "${ADDON_SYSTEMCTL_PY}" "$@"
+}
+
+main "$@"

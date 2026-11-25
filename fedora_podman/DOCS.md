@@ -257,9 +257,11 @@ that process yourself after every add-on restart.
 ### Making containers come back automatically
 
 There is no systemd in here, so Podman's `--restart=always` policy is not
-applied by anything at boot; `podman generate systemd` is likewise useless
-(`podman-restart.service` is what does this job on a normal Fedora, and there
-is no service manager to run it). The add-on replaces that, and the rule is the
+applied by anything at boot: `podman-restart.service` is what does this job on
+a normal Fedora, and the add-on does not start what the image's presets
+enabled (see *What the add-on starts at boot*); Quadlet needs systemd's
+generators, which nothing runs here. The
+add-on replaces that, and the rule is the
 one you would expect of an add-on rather than the one Podman's policies
 describe:
 
@@ -398,49 +400,84 @@ makes PID 1 in here Home Assistant OS's own systemd. Nothing of ours can take
 that place. The choice is between a host filesystem and a real init, and this
 add-on exists for the former.
 
-So `systemctl` is a replacement that reads the same unit files, from the same
-places — `/etc/systemd/system`, `/run/systemd/system`,
+So `systemctl` is **[docker-systemctl-replacement][dsr]** by Guido U. Draheim
+(`systemctl3.py`, version 1.7.1097, licensed under the
+[EUPL-1.2][eupl]): a systemctl that reads the unit files packages install, from
+the usual places (`/etc/systemd/system`, `/run/systemd/system`,
 `/usr/local/lib/systemd/system`, `/usr/lib/systemd/system`, drop-ins in
-`<unit>.d/*.conf` included — and runs them:
+`<unit>.d/*.conf` included), and runs what they say. It is fetched when the
+image is built, pinned and checked against a hash, and installed at
+`/usr/bin/systemctl` and `/usr/bin/journalctl` behind a thin wrapper of the
+add-on's own (`/usr/lib/addon-systemctl/`). Up to 2.0.0 the add-on carried its
+own bash reimplementation in `/usr/local/bin` instead; see the changelog for
+why it went.
+
+[dsr]: https://github.com/gdraheim/docker-systemctl-replacement
+[eupl]: https://github.com/gdraheim/docker-systemctl-replacement/blob/v1.7.1097/EUPL-LICENSE.md
+
+The everyday commands work as you would expect:
 
 ```sh
-systemctl start | stop | restart | try-restart UNIT
-systemctl reload | reload-or-restart UNIT
-systemctl kill [--signal=HUP] UNIT
+systemctl start | stop | restart | try-restart | reload UNIT
 systemctl enable | disable [--now] UNIT
-systemctl reenable | mask | unmask UNIT
-systemctl status [UNIT]              # state, main PID, drop-ins, tail of its log
+systemctl mask | unmask UNIT
+systemctl status UNIT
 systemctl is-active | is-enabled | is-failed UNIT
 systemctl reset-failed [UNIT]
-systemctl show [-p MainPID] UNIT     # properties, as KEY=VALUE
-systemctl list-units [--all] [--type=service]
-systemctl list-dependencies UNIT
-systemctl cat UNIT                   # the file, its drop-ins, and where they are
+systemctl show [-p MainPID] UNIT
+systemctl list-units | list-unit-files
+systemctl cat UNIT
+systemctl daemon-reload              # accepted; nothing is cached to reload
 ```
 
-`enable` links the unit into the `.wants` directory of every target its
-`[Install]` section names — `multi-user.target` when it names none — exactly as
-systemd does. Those directories are on `/etc`, which is on the add-on's
-persistent layer, so what you enable once is started again every time the
-add-on starts, in the order `After=` asks for.
+`systemctl help` lists everything upstream implements, and its
+[documentation][dsr] is the reference for what each one does. In short, from
+its source: `Type=simple`, `exec`, `idle`, `forking`, `notify` and `oneshot`;
+`ExecStartPre`, `ExecStart`, `ExecStartPost`, `ExecReload`, `ExecStop` and
+`ExecStopPost`; `Environment=` and `EnvironmentFile=`; `User=`, `Group=`,
+`WorkingDirectory=`; `PIDFile=`; `RemainAfterExit=`; `RuntimeDirectory=` and
+its siblings; `StandardOutput=`/`StandardError=` to `null`, `file:` or
+`append:`; the common `Condition*`/`Assert*` checks; template units and the
+usual `%` specifiers; masking; and old SysV scripts in `/etc/init.d`. What it
+does *not* do, and what that means here:
 
-Logs are per unit under `/var/log/addon-units/`, rotated at 5 MB, and units the
-add-on started at boot also log to the Home Assistant add-on log, tagged with
-the unit name (or with `SyslogIdentifier=`). There is no journal, but the
-command people reach for works on those files:
+- **No dependency pull-in.** `Requires=` and `Wants=` do not start other units;
+  `After=`/`Before=` only order the units named in one command (and the boot
+  set below). If a service needs another one, enable both.
+- **No socket, timer, path or D-Bus activation.** A unit that is only ever
+  started by one of those is never started.
+- **No sandboxing and no resource control.** `PrivateTmp`, `ProtectSystem`,
+  `DynamicUser` and the like are ignored (and logged as ignored); so are the
+  cgroup knobs. In here the add-on *is* the sandbox.
+- **`Restart=` applies only to the units started at boot** — see below.
+
+### Logs
+
+Each service's output goes to its own file,
+`/var/log/journal/<unit file>.log` (an instance of a template shares the
+template's file, `wg-quick@.service.log`). The files are plain text, rotated
+to `.log.1` at 5 MB each time the add-on starts. `journalctl` shows them:
 
 ```sh
-journalctl -u tailscaled -f       # follow one unit
-journalctl -u tailscaled -n 100   # its last hundred lines
-journalctl --list-units           # everything that has logged
+journalctl -u netbird -n 100    # its last hundred lines
+journalctl -u netbird -f        # follow it
 ```
+
+That is all of `journalctl` there is: `-u`, `-n`, `-f` and `--no-pager`. There
+is no journal to query by boot, time or priority — `grep` and `less` on the
+files do the rest.
+
+The units the add-on starts at boot are also forwarded to the Home Assistant
+add-on log, each line tagged with its unit, for example
+`[netbird.service] ...`. Only what they write from then on: a unit's earlier
+history stays in its file.
 
 ### What the add-on starts at boot
 
 What you enabled here — not everything that is enabled.
 
 A Fedora image arrives with units already linked into `/etc/systemd/system`:
-`getty@tty1`, the `systemd-*` services and sockets, first-boot maintenance like
+`getty@tty1`, the `systemd-*` services, first-boot maintenance like
 `selinux-autorelabel-mark` and `rpmdb-rebuild`, and — because this add-on
 installs `openssh-server` — `sshd.service`. Nobody chose those here; they are
 what each package's preset did while the image was being built, for a machine
@@ -448,80 +485,80 @@ that boots with a real systemd.
 
 So the set the image came with is recorded when the image is built, and the
 add-on starts what was enabled *since*: by you over SSH, or by a package you
-installed at runtime. `systemctl enable` records the unit, so enabling
-something the image already had works too, and means it. `systemctl list-units`
-still shows everything, and the add-on log says how many it left alone.
+installed at runtime. `systemctl enable` is recorded (in
+`/etc/addon-systemctl/enabled`), so enabling something the image already had
+works too, and means it; `systemctl disable` removes it again. systemd's own
+plumbing (`systemd-*`, `dbus*`, the gettys) is also left alone if it becomes
+enabled later — `dnf reinstall systemd` would enable all of it at once —
+unless you `systemctl enable` it explicitly. The add-on log says how many units
+it left alone, and warns about links whose unit no longer exists.
 
-**`sshd.service` is the exception that is always refused.** This add-on *is* an
-sshd — it is how you get in — and two of them cannot hold the same port. If the
-distribution's sshd starts first, the add-on's own fails to bind and the add-on
-exits with `Address already in use`, which leaves no way in to undo it. Use the
-`ssh_port` option to move the add-on's; a second sshd is not something to run
-in here.
+**`Restart=` is applied to exactly those units.** The replacement only
+restarts failed units from its *init loop*, and the add-on runs that loop in
+the background for the boot set: it checks every five seconds (sooner if a
+unit's `RestartSec=` asks for it) and restarts a unit that failed, as
+`Restart=` says. Upstream also applies systemd's start limit — five restarts
+within ten seconds and it gives up on the unit, until `systemctl
+reset-failed UNIT`.
 
-### What is honoured, and what is not
+**A unit you start yourself over SSH is not watched.** It runs, and keeps
+running after your session ends, but if it dies nothing restarts it until the
+next add-on start — and then only if it is enabled. This is upstream's design
+(the loop watches the list it was started with), not an oversight; restart the
+add-on, or `systemctl start` the unit again, after enabling something you need
+supervised.
 
-**`[Unit]`** — `Description`, `Documentation`, `After`, `Before`, `Requires`,
-`Requisite`, `Wants`, `BindsTo`, `PartOf`, `Conflicts`, and the `Condition*` /
-`Assert*` checks on paths, files, directories, users, groups, the kernel
-command line, the host name and virtualisation (this is a container, so
-`ConditionVirtualization=container` is true and `=no` is false).
+Stopping the add-on is best-effort for units, as it always was: Docker's init
+forwards the stop signal to sshd alone, so the loop never runs its own
+shutdown and the units are killed with the container rather than taken down
+with their `ExecStop=`. Nothing waits on them either, so a stuck unit cannot
+hold up the add-on's stop. Treat it like a power cut — which a daemon has to
+survive anyway.
 
-Starting a unit pulls in what it `Requires=` and `Wants=`, ordered by `After=`;
-a failed `Requires=` stops the start, a failed `Wants=` only says so. Stopping
-one stops whatever declares `PartOf=` or `BindsTo=` it. `Conflicts=` is stopped
-first.
+### `sshd.service` is always refused
 
-**`[Service]`** — `Type=simple`, `exec`, `idle`, `notify`, `oneshot` and
-`forking`; `ExecCondition`, `ExecStartPre`, `ExecStart` (several lines for
-`oneshot`), `ExecStartPost`, `ExecReload`, `ExecStop`, `ExecStopPost`;
-`Environment=` and `EnvironmentFile=`; `WorkingDirectory`, `RootDirectory`,
-`User`, `Group`, `SupplementaryGroups`, `UMask`, `Nice`, `OOMScoreAdjust` and
-`Limit*`; `PIDFile`; `Restart=` with `RestartSec`, `SuccessExitStatus`,
-`RestartPreventExitStatus` and `RestartForceExitStatus`; `RemainAfterExit`;
-`TimeoutStartSec` and `TimeoutStopSec`; `KillMode`, `KillSignal`,
-`FinalKillSignal` and `SendSIGKILL`; `RuntimeDirectory`, `StateDirectory`,
-`CacheDirectory`, `LogsDirectory`, `ConfigurationDirectory` with their
-`*Mode=` and `RuntimeDirectoryPreserve=`; `StandardOutput=` and
-`StandardError=` (`journal`, `null`, `file:`, `append:`, `inherit`);
-`SyslogIdentifier`.
+This add-on *is* an sshd — it is how you get in — and two of them cannot hold
+the same port. If the distribution's sshd started, the add-on's own would fail
+to bind, the add-on would exit with `Address already in use`, and there would
+be no way in to undo it. So:
 
-**`[Install]`** — `WantedBy`, `RequiredBy`, `Also`, `Alias`.
+- `systemctl start`, `restart`, `reload-or-restart`, `unmask` and
+  `enable --now` of `sshd`, `sshd.socket` or `sshd@*` are refused with a
+  message saying why (globs like `ssh*` count);
+- `stop`, `try-restart` and `reload` of them succeed and do nothing, so the
+  openssh-server package's own scriptlets run cleanly;
+- `sshd.service` and `sshd.socket` are masked in the image, which is what stops
+  them being started along with a target (`systemctl start multi-user.target`);
+- the boot never starts them, whatever is enabled.
 
-**Files** — drop-ins, masking (a symlink to `/dev/null`, and masking a unit
-file that lives in `/etc/systemd/system` is refused rather than allowed to
-delete it), line continuations, template units (`foo@bar.service`), and the
-specifiers `%i %I %n %N %p %P %f %j %t %S %C %L %E %T %V %h %u %U %H %m %b %%`.
+Use the `ssh_port` option to move the add-on's sshd; a second one is not
+something to run in here.
 
-Not supported, and ignored rather than half-applied:
+### Package scriptlets, and why this is at `/usr/bin`
 
-- **Socket, timer, path and D-Bus activation.** There is no bus and no event
-  loop here, so a unit that is only ever started by one of those is never
-  started. Targets are synchronisation points with nothing to execute, so they
-  are inert: pulling one in starts the services *it* wants, not the target.
-- **The `Type=notify` readiness protocol.** Such a unit runs as `simple`, and
-  `NOTIFY_SOCKET` is deliberately left unset — which `sd_notify()` reads as
-  "no manager is listening" and turns into a no-op, so the daemon runs; it just
-  has nowhere to report readiness to. A unit whose `ExecStartPost` waits for
-  that readiness will wait in vain.
-- **The sandboxing directives** — `PrivateTmp`, `ProtectSystem`,
-  `NoNewPrivileges`, `DynamicUser`, the capability sets. In here the add-on
-  *is* the sandbox, and a half-applied confinement is worse than an honest
-  none.
-- **Resource control** — `CPUQuota`, `MemoryMax` and the other cgroup knobs.
-  The add-on's own cgroup belongs to the Supervisor, and carving it up per
-  service is not something to do behind your back. `Limit*` *is* applied,
-  because it is per-process (`setrlimit`) and needs no cgroup.
+rpm runs a package's scriptlets with a fixed `PATH=/sbin:/bin:/usr/sbin:/usr/bin`,
+so whatever answers at `/usr/bin/systemctl` is what a `%post` talks to. That is
+why the replacement is there and not in `/usr/local/bin` — where the add-on's
+old service manager lived, invisible to rpm. The bug that showed it:
+`dnf upgrade netbird` left the **old** netbird running. Its upgrade scriptlet
+runs `systemctl stop netbird` and then `netbird service start`; with nothing
+working at `/usr/bin/systemctl` the stop never happened, and the start found
+the old daemon still up and did nothing. Now the stop stops it, and the start
+starts the new one.
 
-Three differences worth knowing. `Restart=` is applied with a backoff that
-grows to a minute, so a misconfigured service cannot spin; a unit that ran for
-over a minute gets its short delay back. Stopping a unit signals its whole
-process group — the closest thing here to systemd stopping a cgroup — so a
-daemon that forked helpers does not leave them behind, and `KillMode=` chooses
-between that and the main process alone. And `Exec*` lines are run through a
-shell, which is more permissive than systemd, not less: the difference only
-shows with shell metacharacters, and `${VAR}` expands from the unit's own
-environment either way.
+The systemd package ships its own `/usr/bin/systemctl` and `journalctl`, and is
+in the image as a dependency of other packages. Its binaries are kept at
+`/usr/lib/addon-systemctl/systemd/` for anyone who wants them (systemd's
+offline `systemctl --root=...` does work without a running systemd), and rpm
+is told never to write those two paths again: `/etc/rpm/macros.addon-systemctl`
+sets `%_netsharedpath`, so installing, upgrading or removing systemd leaves the
+replacement in place. And because `/usr` is persistent, an install that
+upgraded systemd before this existed may still have systemd's binary in its
+upper layer; the add-on checks on every start and puts the replacement back,
+saying so in the log once when it does.
+
+`python3` is what the replacement runs on, so it is a protected package: `dnf
+remove python3` is refused rather than taking `systemctl` with it.
 
 ### VPN clients and `/dev/net/tun`
 
@@ -546,16 +583,11 @@ another client of the same VPN running elsewhere on the host.
 
 Some programs install their service by writing one — `netbird service install`
 is an example. That works: such installers detect systemd by looking for a
-`systemctl` and at `/proc/1/comm`, ask `systemctl --version` to decide which
-unit-file features they may use, then write the unit and run `enable` and
-`daemon-reload`. All four are answered here, `daemon-reload` doing nothing
-because nothing is cached.
-
-Note that installing such a package often pulls the systemd package itself in,
-for its scriptlets. That is harmless: `systemctl` still resolves to the
-replacement, because `/usr/local/bin` comes first in `PATH` and the replacement
-does not hand over to the real binary — which could only refuse, having no
-systemd to talk to.
+`systemctl` and at `/proc/1/comm` (which, with the host's PID namespace, really
+is `systemd`), ask `systemctl --version` which features they may use, then
+write the unit and run `enable`, `daemon-reload` and `start`. All of those are
+answered by the replacement, `daemon-reload` doing nothing because nothing is
+cached.
 
 For a program that ships no unit at all, writing one is the same work as
 writing any other service file, and it belongs in `/etc/systemd/system`:
@@ -572,12 +604,13 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
+then `systemctl enable --now mydaemon`, and restart the add-on once if you want
+`Restart=` to watch it before the next reboot (see above).
+
 The one rule that matters: **either the command stays in the foreground, or it
 says where it went.** A unit whose `ExecStart` daemonises needs
-`Type=forking` *and* a `PIDFile=`; that PID is then the unit's, and it is
-watched and stopped like any other. `Type=forking` without a `PIDFile=` leaves
-nothing to supervise and nothing to stop — the add-on says so in the log and
-leaves it alone rather than restarting a program that is already running.
+`Type=forking` *and* a `PIDFile=`, so that the replacement knows which process
+is the service — to report it, to stop it, and to notice when it is gone.
 
 ## Resetting the add-on
 

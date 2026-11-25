@@ -6,7 +6,7 @@ shell with Podman for running your own containers alongside Home Assistant.
 | Logo | Name | Description |
 |---|---|---|
 | <img src="nginx_ui/icon.png" width="72"> | **[Nginx UI](nginx_ui)** | nginx and [Nginx UI](https://github.com/0xJacky/nginx-ui) as its control panel: sites, streams, TLS certificates, log search and a config editor, all from the browser. Optional failover with keepalived and a virtual IP. |
-| <img src="fedora_podman/icon.png" width="72"> | **[Fedora Podman Shell](fedora_podman)** | A Fedora root shell over SSH with Podman, for running your own containers next to — but isolated from — the Supervisor's Docker. Persistent packages, the host filesystem at `/host`, background daemons without systemd. |
+| <img src="fedora_podman/icon.png" width="72"> | **[Fedora Podman Shell](fedora_podman)** | A Fedora root shell over SSH with Podman, for running your own containers next to — but isolated from — the Supervisor's Docker. Persistent packages, the host filesystem at `/host`, background daemons from their own unit files without systemd, via docker-systemctl-replacement. |
 
 ## Adding this repository
 
